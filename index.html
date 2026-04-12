@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SVG Optimizer</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>" />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="header">
+        <div class="header-left">
+          <span class="logo">⚡ SVG Optimizer</span>
+        </div>
+        <div class="header-actions">
+          <button id="btn-presets" class="btn btn-secondary">Préréglages</button>
+          <button id="btn-copy" class="btn btn-secondary" disabled>Copier SVG</button>
+          <button id="btn-download" class="btn btn-primary" disabled>Télécharger</button>
+        </div>
+      </header>
+
+      <div class="layout">
+        <!-- Panel gauche : options + plugins -->
+        <aside class="sidebar" id="sidebar">
+          <div class="sidebar-header">
+            <span class="sidebar-title">Options SVGO</span>
+            <div class="sidebar-actions">
+              <button id="btn-enable-all" class="btn-link">Tout activer</button>
+              <span class="sep">|</span>
+              <button id="btn-disable-all" class="btn-link">Tout désactiver</button>
+              <span class="sep">|</span>
+              <button id="btn-reset" class="btn-link">Réinitialiser</button>
+            </div>
+          </div>
+          <div class="plugins-list" id="plugins-list">
+            <!-- Options globales injectées ici par JS, puis les plugins -->
+          </div>
+        </aside>
+
+        <!-- Zone principale -->
+        <main class="main">
+          <!-- Drop zone (visible quand pas de fichier) -->
+          <div class="dropzone" id="dropzone">
+            <div class="dropzone-content">
+              <div class="dropzone-icon">📂</div>
+              <p class="dropzone-text">Glissez des fichiers ou un dossier ici</p>
+              <p class="dropzone-or">ou</p>
+              <label class="btn btn-primary" for="file-input">Choisir des fichiers</label>
+              <input type="file" id="file-input" accept=".svg,image/svg+xml" multiple hidden />
+              <p class="dropzone-or">ou</p>
+              <button class="btn btn-secondary" id="btn-paste-open">Coller du SVG</button>
+            </div>
+          </div>
+
+          <!-- Batch view (visible avec plusieurs fichiers) -->
+          <div class="batch-view" id="batch-view" hidden>
+            <div class="batch-toolbar">
+              <span class="batch-toolbar-info">
+                <span id="batch-count">0 fichiers</span>
+                <span class="batch-sep" id="batch-savings-summary"></span>
+              </span>
+              <div class="batch-toolbar-actions">
+                <button class="btn btn-sm btn-ghost" id="btn-batch-add">+ Ajouter</button>
+                <button class="btn btn-sm btn-primary" id="btn-download-zip" disabled>Télécharger tout (ZIP)</button>
+                <button class="btn btn-sm btn-ghost" id="btn-batch-clear">Nouveau</button>
+              </div>
+            </div>
+            <div class="batch-stale-banner" id="batch-stale-banner" hidden>
+              Les réglages ont changé — les résultats affichés ne sont plus à jour.
+              <button class="btn btn-sm btn-primary" id="btn-reoptimize-all">Ré-optimiser tout</button>
+            </div>
+            <div class="batch-list" id="batch-list"></div>
+          </div>
+
+          <!-- Zone de travail (visible après chargement) -->
+          <div class="workspace" id="workspace" hidden>
+            <!-- Stats bar -->
+            <div class="stats-bar" id="stats-bar">
+              <div class="stat">
+                <span class="stat-label">Original</span>
+                <span class="stat-value" id="stat-original">—</span>
+              </div>
+              <div class="stat-arrow">→</div>
+              <div class="stat">
+                <span class="stat-label">Optimisé</span>
+                <span class="stat-value" id="stat-optimized">—</span>
+              </div>
+              <div class="stat stat-savings">
+                <span class="stat-label">Économie</span>
+                <span class="stat-value" id="stat-savings">—</span>
+              </div>
+              <div class="stat-spacer"></div>
+              <button class="btn btn-sm btn-ghost" id="btn-back-to-batch" hidden>← Retour</button>
+              <button class="btn btn-sm btn-ghost" id="btn-new">Nouveau fichier</button>
+            </div>
+
+            <!-- Previews -->
+            <div class="preview-container" id="preview-container">
+              <div class="preview-panel">
+                <div class="preview-label">Original</div>
+                <div class="preview-box" id="preview-original"></div>
+              </div>
+              <div class="preview-divider"></div>
+              <div class="preview-panel">
+                <div class="preview-label">Optimisé</div>
+                <div class="preview-box" id="preview-optimized"></div>
+              </div>
+
+            </div>
+
+            <!-- Tabs code/preview -->
+            <div class="output-tabs">
+              <button class="tab active" data-tab="preview">Aperçu</button>
+              <button class="tab" data-tab="code">Code SVG</button>
+            </div>
+            <div class="output-panel" id="output-panel">
+              <div class="output-section" id="tab-preview">
+                <div class="svg-viewer" id="svg-viewer-original">
+                  <div class="svg-viewer-label">Original</div>
+                  <div class="svg-display" id="svg-display-original"></div>
+                </div>
+                <div class="svg-viewer" id="svg-viewer-optimized">
+                  <div class="svg-viewer-label">Optimisé</div>
+                  <div class="svg-display" id="svg-display-optimized">
+                    <div class="loading-spinner"><div class="spinner-ring"></div></div>
+                  </div>
+                </div>
+              </div>
+              <div class="output-section hidden" id="tab-code">
+                <div class="code-panels">
+                  <div class="code-panel">
+                    <div class="code-label">Original</div>
+                    <pre class="code-block" id="code-original"></pre>
+                  </div>
+                  <div class="code-panel">
+                    <div class="code-label">Optimisé</div>
+                    <pre class="code-block" id="code-optimized"></pre>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </main>
+      </div>
+    </div>
+
+    <!-- Modal coller SVG -->
+    <div class="modal-overlay hidden" id="modal-paste">
+      <div class="modal">
+        <div class="modal-header">
+          <span class="modal-title">Coller du SVG</span>
+          <button class="modal-close" id="modal-close">✕</button>
+        </div>
+        <textarea class="modal-textarea" id="paste-textarea" placeholder="Collez votre SVG ici…"></textarea>
+        <div class="modal-footer">
+          <button class="btn btn-ghost" id="btn-paste-cancel">Annuler</button>
+          <button class="btn btn-primary" id="btn-paste-confirm">Optimiser</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal préréglages -->
+    <div class="modal-overlay hidden" id="modal-presets">
+      <div class="modal modal-presets">
+        <div class="modal-header">
+          <span class="modal-title">Préréglages</span>
+          <button class="modal-close" id="presets-close">✕</button>
+        </div>
+
+        <!-- Save current -->
+        <div class="presets-save">
+          <input
+            type="text"
+            id="preset-name-input"
+            class="preset-name-input"
+            placeholder="Nom du préréglage…"
+            maxlength="60"
+          />
+          <button class="btn btn-primary" id="btn-preset-save">Sauvegarder</button>
+        </div>
+
+        <!-- List -->
+        <div class="presets-list" id="presets-list">
+          <div class="presets-empty" id="presets-empty">Aucun préréglage sauvegardé.</div>
+        </div>
+
+        <!-- Import / Export -->
+        <div class="presets-footer">
+          <button class="btn btn-ghost btn-sm" id="btn-presets-import">Importer JSON</button>
+          <input type="file" id="presets-file-input" accept=".json,application/json" hidden />
+          <button class="btn btn-ghost btn-sm" id="btn-presets-export">Exporter JSON</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
