@@ -113,6 +113,7 @@
             <div class="output-tabs">
               <button class="tab active" data-tab="preview">Aperçu</button>
               <button class="tab" data-tab="code">Code SVG</button>
+              <button class="tab" data-tab="analysis">Analyse</button>
             </div>
             <div class="output-panel" id="output-panel">
               <div class="output-section" id="tab-preview">
@@ -136,6 +137,28 @@
                   <div class="code-panel">
                     <div class="code-label">Optimisé</div>
                     <pre class="code-block" id="code-optimized"></pre>
+                  </div>
+                </div>
+              </div>
+              <div class="output-section hidden" id="tab-analysis">
+                <div class="analysis-shell">
+                  <div class="analysis-panels">
+                    <div class="analysis-column">
+                      <div class="analysis-column-label">Original</div>
+                      <div class="analysis-panel" id="analysis-panel-original">
+                        <div class="analysis-placeholder" id="analysis-placeholder-original">
+                          Chargez un SVG pour lancer l'analyse.
+                        </div>
+                      </div>
+                    </div>
+                    <div class="analysis-column">
+                      <div class="analysis-column-label">Optimisé</div>
+                      <div class="analysis-panel" id="analysis-panel-optimized">
+                        <div class="analysis-placeholder" id="analysis-placeholder-optimized">
+                          Chargez un SVG pour lancer l'analyse.
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>

@@ -26,6 +26,8 @@ Le résultat est dans `dist/` — servable statiquement sans serveur backend.
 - **Options générales** : passes multiples, prettify, précision des nombres et des transformations
 - **Aperçu côte à côte** original / optimisé, avec onglet code SVG
 - **Stats** : taille originale → optimisée → économie %
+- **Onglet Analyse** : répartition du poids par tag / attribut, plus gros sous-arbres et recommandations
+- **Détection des rasters embarqués** : images `data:image/*` isolées avec taille, dimensions et surcoût d'encodage
 - **Copier / Télécharger** le SVG optimisé
 - **Persistance automatique** des paramètres via `localStorage`
 - **Préréglages** nommés avec export/import JSON (portable entre navigateurs)

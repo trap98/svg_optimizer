@@ -1,37 +1,53 @@
 import "./style.css";
 import JSZip from "jszip";
+import type { SvgAnalysis } from "./analysis";
 import { PLUGIN_DEFS } from "./plugins";
 import {
-  loadPluginStates,
-  savePluginStates,
+  DEFAULT_GLOBAL_OPTIONS,
+  type GlobalOptions,
+  type PluginState,
   getDefaultStates,
   loadGlobalOptions,
+  loadPluginStates,
+  savePluginStates,
   saveGlobalOptions,
-  DEFAULT_GLOBAL_OPTIONS,
-  type PluginState,
-  type GlobalOptions,
 } from "./settings";
 import { formatBytes, type OptimizeResult } from "./optimizer";
 import {
-  loadPresets,
-  savePresets,
   createPreset,
   exportPresetsToJson,
   importPresetsFromJson,
+  loadPresets,
+  savePresets,
   type Preset,
 } from "./presets";
+import type { AnalyzeWorkerResponse, OptimizeWorkerResponse, WorkerResponse } from "./worker";
+
+type AnalysisSource = "original" | "optimized";
+
+interface AnalysisCacheEntry {
+  svg: string | null;
+  result: SvgAnalysis | null;
+}
 
 // ─── Worker setup ───────────────────────────────────────────────────────────
 const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
-let pendingRequestId = 0; // Track latest request; ignore stale responses
+let nextWorkerRequestId = 0;
+let pendingOptimizeRequestId = 0;
+const pendingAnalysisRequests = new Map<number, { target: AnalysisSource; svg: string }>();
+const pendingAnalysisRequestBySource: Record<AnalysisSource, number | null> = {
+  original: null,
+  optimized: null,
+};
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-type WorkerResponse =
-  | { id: number; success: true; result: OptimizeResult }
-  | { id: number; success: false; error: string };
-
 worker.onmessage = (e: MessageEvent<WorkerResponse>) => {
-  // Batch response: always handle regardless of pendingRequestId
+  if (e.data.kind === "analyze") {
+    handleAnalysisResponse(e.data);
+    return;
+  }
+
+  // Batch response: always handle regardless of pendingOptimizeRequestId
   const batchIdx = batchRequestMap.get(e.data.id);
   if (batchIdx !== undefined) {
     batchRequestMap.delete(e.data.id);
@@ -39,12 +55,13 @@ worker.onmessage = (e: MessageEvent<WorkerResponse>) => {
     return;
   }
 
-  // Single-file mode: discard stale responses
-  if (e.data.id !== pendingRequestId) return;
+  if (e.data.id !== pendingOptimizeRequestId) return;
 
+  pendingOptimizeRequestId = 0;
   setLoading(false);
 
   if (!e.data.success) {
+    setAnalysisPlaceholder("optimized", "Impossible d'analyser la version optimisée tant que l'optimisation échoue.");
     showToast("Erreur lors de l'optimisation. Le SVG est peut-être invalide.");
     return;
   }
@@ -54,6 +71,8 @@ worker.onmessage = (e: MessageEvent<WorkerResponse>) => {
 
 function applyOptimizationResult(result: OptimizeResult): void {
   optimizedSvg = result.data;
+  optimizedSvgStale = false;
+  invalidateAnalysisCache("optimized");
 
   document.getElementById("stat-original")!.textContent = formatBytes(result.originalSize);
   document.getElementById("stat-optimized")!.textContent = formatBytes(result.optimizedSize);
@@ -68,12 +87,23 @@ function applyOptimizationResult(result: OptimizeResult): void {
 
   btnCopy.disabled = false;
   btnDownload.disabled = false;
+
+  refreshAllAnalysisViews();
 }
 
 worker.onerror = () => {
-  if (pendingRequestId > 0) {
+  if (pendingOptimizeRequestId > 0) {
+    pendingOptimizeRequestId = 0;
     setLoading(false);
+    setAnalysisPlaceholder("optimized", "Impossible d'analyser la version optimisée tant que l'optimisation échoue.");
     showToast("Erreur interne du worker d'optimisation.");
+  }
+  if (pendingAnalysisRequests.size > 0) {
+    for (const { target } of pendingAnalysisRequests.values()) {
+      setAnalysisPlaceholder(target, "Erreur interne du worker d'analyse.");
+      pendingAnalysisRequestBySource[target] = null;
+    }
+    pendingAnalysisRequests.clear();
   }
 };
 
@@ -92,14 +122,71 @@ function scheduleOptimization(delay = 120): void {
 
 function dispatchOptimization(): void {
   if (!originalSvg) return;
-  pendingRequestId = pendingRequestId + 1;
+  const requestId = ++nextWorkerRequestId;
+  pendingOptimizeRequestId = requestId;
   setLoading(true);
   worker.postMessage({
-    id: pendingRequestId,
+    kind: "optimize",
+    id: requestId,
     svgString: originalSvg,
     pluginStates,
     globalOptions,
   });
+}
+
+function requestSvgAnalysis(source: AnalysisSource): void {
+  const svgString = getSvgForAnalysis(source);
+  if (!svgString) {
+    setAnalysisPlaceholder(source, getAnalysisUnavailableMessage(source));
+    return;
+  }
+
+  const cache = analysisCache[source];
+  if (cache.result !== null && cache.svg === svgString) {
+    renderAnalysis(cache.result, source);
+    return;
+  }
+
+  const existingRequestId = pendingAnalysisRequestBySource[source];
+  if (existingRequestId !== null) {
+    const existingRequest = pendingAnalysisRequests.get(existingRequestId);
+    if (existingRequest?.svg === svgString) return;
+  }
+
+  const requestId = ++nextWorkerRequestId;
+  pendingAnalysisRequestBySource[source] = requestId;
+  pendingAnalysisRequests.set(requestId, { target: source, svg: svgString });
+  setAnalysisPlaceholder(source, getAnalysisLoadingMessage(source));
+  worker.postMessage({
+    kind: "analyze",
+    id: requestId,
+    svgString,
+  });
+}
+
+function handleAnalysisResponse(response: AnalyzeWorkerResponse): void {
+  const pending = pendingAnalysisRequests.get(response.id);
+  if (!pending) return;
+  pendingAnalysisRequests.delete(response.id);
+
+  const { target, svg: analyzedSvg } = pending;
+  if (pendingAnalysisRequestBySource[target] !== response.id) return;
+  pendingAnalysisRequestBySource[target] = null;
+
+  if (!response.success) {
+    analysisCache[target] = { svg: null, result: null };
+    setAnalysisPlaceholder(target, "Impossible d'analyser ce SVG.");
+    return;
+  }
+
+  analysisCache[target] = {
+    svg: analyzedSvg,
+    result: response.result,
+  };
+
+  if (getSvgForAnalysis(target) === analyzedSvg) {
+    renderAnalysis(response.result, target);
+  }
 }
 
 // ─── State ─────────────────────────────────────────────────────────────────
@@ -108,7 +195,12 @@ let globalOptions: GlobalOptions = loadGlobalOptions();
 let presets: Preset[] = loadPresets();
 let originalSvg: string | null = null;
 let optimizedSvg: string | null = null;
+let optimizedSvgStale = false;
 let originalFileName = "optimized.svg";
+const analysisCache: Record<AnalysisSource, AnalysisCacheEntry> = {
+  original: { svg: null, result: null },
+  optimized: { svg: null, result: null },
+};
 
 // ─── Batch state ────────────────────────────────────────────────────────────
 type BatchFileStatus = "pending" | "processing" | "done" | "error";
@@ -171,6 +263,14 @@ const svgDisplayOriginal = document.getElementById("svg-display-original")!;
 const svgDisplayOptimized = document.getElementById("svg-display-optimized")!;
 const codeOriginal = document.getElementById("code-original")!;
 const codeOptimized = document.getElementById("code-optimized")!;
+const analysisPanels: Record<AnalysisSource, HTMLElement> = {
+  original: document.getElementById("analysis-panel-original")!,
+  optimized: document.getElementById("analysis-panel-optimized")!,
+};
+const analysisPlaceholders: Record<AnalysisSource, HTMLElement> = {
+  original: document.getElementById("analysis-placeholder-original")!,
+  optimized: document.getElementById("analysis-placeholder-optimized")!,
+};
 
 const modalPaste = document.getElementById("modal-paste")!;
 const pasteTextarea = document.getElementById("paste-textarea") as HTMLTextAreaElement;
@@ -444,11 +544,19 @@ function onPluginToggle(name: string, enabled: boolean): void {
 // ─── Load SVG ──────────────────────────────────────────────────────────────
 function loadSvg(content: string, filename = "optimized.svg"): void {
   originalSvg = content;
+  optimizedSvg = null;
+  optimizedSvgStale = false;
   originalFileName = filename.replace(/\.svg$/i, "") + "-optimized.svg";
   dropzone.hidden = true;
   workspace.hidden = false;
   svgDisplayOriginal.innerHTML = content;
+  svgDisplayOptimized.innerHTML = '<div class="loading-spinner"><div class="spinner-ring"></div></div>';
   codeOriginal.textContent = content;
+  codeOptimized.textContent = "";
+  btnCopy.disabled = true;
+  btnDownload.disabled = true;
+  resetAnalysisState();
+  refreshAllAnalysisViews();
   scheduleOptimization(0); // immediate on first load
 }
 
@@ -590,6 +698,8 @@ btnReset.addEventListener("click", () => {
 btnNew.addEventListener("click", () => {
   originalSvg = null;
   optimizedSvg = null;
+  optimizedSvgStale = false;
+  resetAnalysisState();
   workspace.hidden = true;
   dropzone.hidden = false;
   btnCopy.disabled = true;
@@ -598,6 +708,7 @@ btnNew.addEventListener("click", () => {
   svgDisplayOptimized.innerHTML = "";
   codeOriginal.textContent = "";
   codeOptimized.textContent = "";
+  refreshAllAnalysisViews();
 });
 
 // ─── Copy to clipboard ─────────────────────────────────────────────────────
@@ -634,6 +745,7 @@ const tabs = document.querySelectorAll<HTMLButtonElement>(".tab");
 const tabPanels: Record<string, HTMLElement> = {
   preview: document.getElementById("tab-preview")!,
   code: document.getElementById("tab-code")!,
+  analysis: document.getElementById("tab-analysis")!,
 };
 
 tabs.forEach((tab) => {
@@ -646,6 +758,488 @@ tabs.forEach((tab) => {
     }
   });
 });
+
+interface PotentialGain {
+  level: "opportunity" | "warning" | "info";
+  title: string;
+  description: string;
+  impactBytes: number;
+}
+
+function getSvgForAnalysis(source: AnalysisSource): string | null {
+  if (source === "original") return originalSvg;
+  if (optimizedSvgStale) return null;
+  return optimizedSvg;
+}
+
+function getAnalysisSourceLabel(source: AnalysisSource): string {
+  return source === "original" ? "originale" : "optimisée";
+}
+
+function getAnalysisLoadingMessage(source: AnalysisSource): string {
+  return `Analyse de la version ${getAnalysisSourceLabel(source)} en cours…`;
+}
+
+function getAnalysisUnavailableMessage(source: AnalysisSource): string {
+  if (!originalSvg) return "Chargez un SVG pour lancer l'analyse.";
+  if (source === "optimized") return "Analyse de la version optimisée en attente de l'optimisation…";
+  return "Analyse de la version originale indisponible.";
+}
+
+function invalidateAnalysisCache(source: AnalysisSource): void {
+  analysisCache[source] = { svg: null, result: null };
+}
+
+function resetAnalysisState(): void {
+  invalidateAnalysisCache("original");
+  invalidateAnalysisCache("optimized");
+  for (const source of ["original", "optimized"] as const) {
+    pendingAnalysisRequestBySource[source] = null;
+  }
+  pendingAnalysisRequests.clear();
+}
+
+function refreshAllAnalysisViews(): void {
+  for (const source of ["original", "optimized"] as const) {
+    const svgString = getSvgForAnalysis(source);
+    if (!svgString) {
+      setAnalysisPlaceholder(source, getAnalysisUnavailableMessage(source));
+      continue;
+    }
+    requestSvgAnalysis(source);
+  }
+}
+
+function setAnalysisPlaceholder(source: AnalysisSource, message: string): void {
+  const placeholder = analysisPlaceholders[source];
+  placeholder.textContent = message;
+  analysisPanels[source].replaceChildren(placeholder);
+}
+
+function renderAnalysis(analysis: SvgAnalysis, source: AnalysisSource): void {
+  const stack = document.createElement("div");
+  stack.className = "analysis-stack";
+
+  const note = document.createElement("div");
+  note.className = "analysis-note";
+  note.textContent = `Version analysée : ${getAnalysisSourceLabel(source)}. Répartition estimée sur une version normalisée du SVG pour attribuer les octets par tag et attribut.`;
+  stack.appendChild(note);
+
+  stack.appendChild(buildAnalysisSummary(analysis));
+
+  const gains = derivePotentialGains(analysis);
+  stack.appendChild(
+    createSection(
+      "Gains Potentiels",
+      gains.length > 0 ? `${gains.length} piste${gains.length > 1 ? "s" : ""} détectée${gains.length > 1 ? "s" : ""}` : "Aucun signal évident",
+      gains.length > 0 ? buildGainList(gains) : makeEmptyState("Rien de particulièrement coûteux ne ressort au-delà des optimisations SVGO déjà en place.")
+    )
+  );
+
+  const tableGrid = document.createElement("div");
+  tableGrid.className = "analysis-table-grid";
+  tableGrid.appendChild(
+    createSection(
+      "Poids Direct Par Tag",
+      "Ouverture/fermeture des balises + attributs",
+      buildBreakdownTable(
+        analysis.tagBreakdown.slice(0, 10).map((bucket) => ({
+          name: bucket.name,
+          count: bucket.count,
+          bytes: bucket.directBytes,
+          share: formatShare(bucket.directBytes, analysis.normalizedSize),
+        })),
+        "Tag"
+      )
+    )
+  );
+  tableGrid.appendChild(
+    createSection(
+      "Attributs Dominants",
+      "Contribution cumulée de chaque attribut",
+      buildBreakdownTable(
+        analysis.attributeBreakdown.slice(0, 10).map((bucket) => ({
+          name: bucket.name,
+          count: bucket.count,
+          bytes: bucket.bytes,
+          share: formatShare(bucket.bytes, analysis.normalizedSize),
+        })),
+        "Attribut"
+      )
+    )
+  );
+  stack.appendChild(tableGrid);
+
+  stack.appendChild(
+    createSection(
+      "Sous-arbres Les Plus Lourds",
+      "Poids du nœud complet avec ses descendants",
+      buildHeavyNodeList(analysis)
+    )
+  );
+  stack.appendChild(
+    createSection(
+      "Rasters Embarqués",
+      analysis.embeddedRasters.length > 0 ? "Images data URI non traitées par SVGO" : "Aucun raster embarqué détecté",
+      buildRasterList(analysis)
+    )
+  );
+
+  analysisPanels[source].replaceChildren(stack);
+}
+
+function buildAnalysisSummary(analysis: SvgAnalysis): HTMLElement {
+  const grid = document.createElement("div");
+  grid.className = "analysis-summary-grid";
+
+  const topTag = analysis.tagBreakdown[0];
+  const rasterBytes = analysis.embeddedRasters.reduce((sum, raster) => sum + raster.sourceBytes, 0);
+  const topHeavyNode = analysis.heavyNodes[0];
+
+  grid.appendChild(
+    createSummaryCard("Taille analysée", formatBytes(analysis.normalizedSize), `${analysis.tagBreakdown.length} postes suivis`)
+  );
+  grid.appendChild(
+    createSummaryCard("Éléments", String(analysis.elementCount), `${analysis.attributeBreakdown.length} attributs distincts`)
+  );
+  grid.appendChild(
+    createSummaryCard(
+      "Rasters",
+      analysis.embeddedRasters.length > 0 ? String(analysis.embeddedRasters.length) : "Aucun",
+      analysis.embeddedRasters.length > 0 ? formatBytes(rasterBytes) : "SVG 100% vectoriel"
+    )
+  );
+  grid.appendChild(
+    createSummaryCard(
+      "Point chaud",
+      topTag ? topTag.name : "—",
+      topHeavyNode ? `${formatBytes(topHeavyNode.bytes)} max` : "Aucun sous-arbre notable"
+    )
+  );
+
+  return grid;
+}
+
+function createSummaryCard(label: string, value: string, subvalue: string): HTMLElement {
+  const card = document.createElement("div");
+  card.className = "analysis-card";
+
+  const labelEl = document.createElement("span");
+  labelEl.className = "analysis-card-label";
+  labelEl.textContent = label;
+
+  const valueEl = document.createElement("span");
+  valueEl.className = "analysis-card-value";
+  valueEl.textContent = value;
+
+  const subvalueEl = document.createElement("span");
+  subvalueEl.className = "analysis-card-subvalue";
+  subvalueEl.textContent = subvalue;
+
+  card.appendChild(labelEl);
+  card.appendChild(valueEl);
+  card.appendChild(subvalueEl);
+  return card;
+}
+
+function createSection(title: string, subtitle: string, body: HTMLElement): HTMLElement {
+  const section = document.createElement("section");
+  section.className = "analysis-section";
+
+  const header = document.createElement("div");
+  header.className = "analysis-section-header";
+
+  const titleEl = document.createElement("div");
+  titleEl.className = "analysis-section-title";
+  titleEl.textContent = title;
+
+  const subtitleEl = document.createElement("div");
+  subtitleEl.className = "analysis-section-subtitle";
+  subtitleEl.textContent = subtitle;
+
+  header.appendChild(titleEl);
+  header.appendChild(subtitleEl);
+
+  const sectionBody = document.createElement("div");
+  sectionBody.className = "analysis-section-body";
+  sectionBody.appendChild(body);
+
+  section.appendChild(header);
+  section.appendChild(sectionBody);
+  return section;
+}
+
+function buildGainList(gains: PotentialGain[]): HTMLElement {
+  const container = document.createElement("div");
+  container.className = "analysis-gains";
+
+  for (const gain of gains) {
+    const item = document.createElement("div");
+    item.className = `analysis-gain analysis-gain--${gain.level}`;
+
+    const title = document.createElement("div");
+    title.className = "analysis-gain-title";
+    title.textContent = gain.title;
+
+    const body = document.createElement("div");
+    body.className = "analysis-gain-body";
+    body.textContent = gain.description;
+
+    item.appendChild(title);
+    item.appendChild(body);
+    container.appendChild(item);
+  }
+
+  return container;
+}
+
+function buildBreakdownTable(
+  rows: Array<{ name: string; count: number; bytes: number; share: string }>,
+  firstColumnLabel: string
+): HTMLElement {
+  if (rows.length === 0) {
+    return makeEmptyState("Aucune donnée disponible.");
+  }
+
+  const table = document.createElement("table");
+  table.className = "analysis-table";
+
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const label of [firstColumnLabel, "Occ.", "Poids", "Part"]) {
+    const th = document.createElement("th");
+    th.textContent = label;
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+
+  const tbody = document.createElement("tbody");
+  for (const row of rows) {
+    const tr = document.createElement("tr");
+    tr.appendChild(makeCell(row.name));
+    tr.appendChild(makeCell(String(row.count), "analysis-muted"));
+    tr.appendChild(makeCell(formatBytes(row.bytes)));
+    tr.appendChild(makeCell(row.share));
+    tbody.appendChild(tr);
+  }
+
+  table.appendChild(thead);
+  table.appendChild(tbody);
+  return table;
+}
+
+function buildHeavyNodeList(analysis: SvgAnalysis): HTMLElement {
+  if (analysis.heavyNodes.length === 0) {
+    return makeEmptyState("Aucun sous-arbre significatif trouvé.");
+  }
+
+  const list = document.createElement("div");
+  list.className = "analysis-heavy-list";
+
+  for (const node of analysis.heavyNodes.slice(0, 8)) {
+    const item = document.createElement("div");
+    item.className = "analysis-heavy-item";
+
+    const topLine = document.createElement("div");
+    topLine.className = "analysis-heavy-topline";
+
+    const label = document.createElement("div");
+    label.className = "analysis-heavy-label";
+    label.textContent = node.label;
+
+    const bytes = document.createElement("div");
+    bytes.className = "analysis-heavy-bytes";
+    bytes.textContent = formatBytes(node.bytes);
+
+    topLine.appendChild(label);
+    topLine.appendChild(bytes);
+
+    const path = document.createElement("div");
+    path.className = "analysis-heavy-path";
+    path.textContent = node.note ? `${node.selector} · ${node.note}` : node.selector;
+
+    item.appendChild(topLine);
+    item.appendChild(path);
+    list.appendChild(item);
+  }
+
+  return list;
+}
+
+function buildRasterList(analysis: SvgAnalysis): HTMLElement {
+  if (analysis.embeddedRasters.length === 0) {
+    return makeEmptyState("Aucune balise pointant vers un raster en data URI n'a été trouvée.");
+  }
+
+  const list = document.createElement("div");
+  list.className = "analysis-raster-list";
+
+  for (const raster of analysis.embeddedRasters.slice(0, 8)) {
+    const item = document.createElement("div");
+    item.className = "analysis-raster-item";
+
+    const topLine = document.createElement("div");
+    topLine.className = "analysis-raster-topline";
+
+    const label = document.createElement("div");
+    label.className = "analysis-raster-label";
+    label.textContent = `<${raster.tagName}> · ${raster.mimeType}`;
+
+    const bytes = document.createElement("div");
+    bytes.className = "analysis-raster-bytes";
+    bytes.textContent = formatBytes(raster.sourceBytes);
+
+    topLine.appendChild(label);
+    topLine.appendChild(bytes);
+
+    const meta = document.createElement("div");
+    meta.className = "analysis-raster-meta";
+    meta.textContent = raster.selector;
+
+    const badges = document.createElement("div");
+    badges.className = "analysis-badge-row";
+    badges.appendChild(makeBadge(raster.encoding));
+    if (raster.width !== null && raster.height !== null) {
+      badges.appendChild(makeBadge(`${trimNumber(raster.width)} × ${trimNumber(raster.height)}`));
+    }
+    if (raster.decodedBytes !== null) {
+      badges.appendChild(makeBadge(`payload ${formatBytes(raster.decodedBytes)}`));
+      const overhead = raster.sourceBytes - raster.decodedBytes;
+      if (overhead > 0) badges.appendChild(makeBadge(`surcoût ${formatBytes(overhead)}`));
+    }
+
+    item.appendChild(topLine);
+    item.appendChild(meta);
+    item.appendChild(badges);
+    list.appendChild(item);
+  }
+
+  return list;
+}
+
+function derivePotentialGains(analysis: SvgAnalysis): PotentialGain[] {
+  const gains: PotentialGain[] = [];
+
+  const rasterBytes = analysis.embeddedRasters.reduce((sum, raster) => sum + raster.sourceBytes, 0);
+  if (rasterBytes > 0) {
+    gains.push({
+      level: rasterBytes >= analysis.normalizedSize * 0.25 ? "opportunity" : "info",
+      title: "Les rasters embarqués restent hors du champ de SVGO",
+      description: `${analysis.embeddedRasters.length} image(s) raster représentent ${formatBytes(rasterBytes)} dans les data URI. C'est le meilleur candidat pour une future étape de resize/recompression.`,
+      impactBytes: rasterBytes,
+    });
+  }
+
+  const pathDataBytes = getAttributeBytes(analysis, "d");
+  if (pathDataBytes > analysis.normalizedSize * 0.22) {
+    gains.push({
+      level: "warning",
+      title: "Les tracés dominent encore le poids du fichier",
+      description: `L'attribut d cumule ${formatBytes(pathDataBytes)}. Si le rendu le permet, une simplification amont ou une précision numérique plus basse peut encore aider.`,
+      impactBytes: pathDataBytes,
+    });
+  }
+
+  const extraDigits = estimateExtraDigits(analysis.numericLiteralHistogram, globalOptions.floatPrecision);
+  if (extraDigits > 40) {
+    gains.push({
+      level: "info",
+      title: "Beaucoup de décimales dépassent la précision courante",
+      description: `Environ ${extraDigits} caractères numériques dépassent ${globalOptions.floatPrecision} décimales dans les attributs. Tester une précision plus basse vaut probablement le coup sur certains assets.`,
+      impactBytes: extraDigits,
+    });
+  }
+
+  const styleWeight = getAttributeBytes(analysis, "style") + getTagSubtreeBytes(analysis, "style");
+  if (styleWeight > Math.max(200, analysis.normalizedSize * 0.08)) {
+    gains.push({
+      level: "info",
+      title: "Les styles occupent une part visible du SVG",
+      description: `Styles inline et blocs <style> pèsent ensemble ${formatBytes(styleWeight)}. Il peut rester du gain en fusionnant, minifiant ou convertissant certains styles.`,
+      impactBytes: styleWeight,
+    });
+  }
+
+  const removableDocumentWeight =
+    getTagDirectBytes(analysis, "#comment") +
+    getTagSubtreeBytes(analysis, "metadata") +
+    getTagSubtreeBytes(analysis, "script") +
+    getTagSubtreeBytes(analysis, "title") +
+    getTagSubtreeBytes(analysis, "desc");
+
+  if (removableDocumentWeight > 0) {
+    const disabledCleanupPlugins = [
+      pluginStates.removeComments ? null : "removeComments",
+      pluginStates.removeMetadata ? null : "removeMetadata",
+      pluginStates.removeTitle ? null : "removeTitle",
+      pluginStates.removeDesc ? null : "removeDesc",
+      pluginStates.removeScriptElement ? null : "removeScriptElement",
+    ].filter(Boolean);
+
+    gains.push({
+      level: disabledCleanupPlugins.length > 0 ? "opportunity" : "info",
+      title: "Des métadonnées et contenus annexes restent présents",
+      description:
+        disabledCleanupPlugins.length > 0
+          ? `${formatBytes(removableDocumentWeight)} restent dans commentaires, metadata, title, desc ou script. Les plugins désactivés ${disabledCleanupPlugins.join(", ")} sont les premiers leviers à tester.`
+          : `${formatBytes(removableDocumentWeight)} résident dans commentaires, metadata, title, desc ou script. Certains sont sans doute volontaires, mais ce poste mérite d'être vérifié.`,
+      impactBytes: removableDocumentWeight,
+    });
+  }
+
+  return gains.sort((a, b) => b.impactBytes - a.impactBytes).slice(0, 4);
+}
+
+function getAttributeBytes(analysis: SvgAnalysis, name: string): number {
+  return analysis.attributeBreakdown.find((bucket) => bucket.name === name)?.bytes ?? 0;
+}
+
+function getTagDirectBytes(analysis: SvgAnalysis, name: string): number {
+  return analysis.tagBreakdown.find((bucket) => bucket.name === name)?.directBytes ?? 0;
+}
+
+function getTagSubtreeBytes(analysis: SvgAnalysis, name: string): number {
+  return analysis.tagBreakdown.find((bucket) => bucket.name === name)?.subtreeBytes ?? 0;
+}
+
+function estimateExtraDigits(histogram: number[], precision: number): number {
+  let extraDigits = 0;
+  for (let decimals = precision + 1; decimals < histogram.length; decimals++) {
+    extraDigits += (histogram[decimals] ?? 0) * (decimals - precision);
+  }
+  return extraDigits;
+}
+
+function makeBadge(text: string): HTMLElement {
+  const badge = document.createElement("div");
+  badge.className = "analysis-badge";
+  badge.textContent = text;
+  return badge;
+}
+
+function makeEmptyState(text: string): HTMLElement {
+  const empty = document.createElement("div");
+  empty.className = "analysis-empty-state";
+  empty.textContent = text;
+  return empty;
+}
+
+function makeCell(text: string, className?: string): HTMLElement {
+  const cell = document.createElement("td");
+  cell.textContent = text;
+  if (className) cell.className = className;
+  return cell;
+}
+
+function formatShare(bytes: number, total: number): string {
+  if (total <= 0) return "0%";
+  const share = (bytes / total) * 100;
+  return `${share.toFixed(share >= 10 ? 0 : 1)}%`;
+}
+
+function trimNumber(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
 
 // ─── Toast ─────────────────────────────────────────────────────────────────
 function showToast(message: string): void {
@@ -820,6 +1414,11 @@ function onSettingsChange(immediate = false): void {
     // If on a file preview, the banner will appear when returning to the list (goBackToBatch)
   }
   if (originalSvg) {
+    optimizedSvgStale = true;
+    invalidateAnalysisCache("optimized");
+    refreshAllAnalysisViews();
+  }
+  if (originalSvg) {
     scheduleOptimization(immediate ? 0 : undefined);
   }
 }
@@ -853,6 +1452,8 @@ function initBatchMode(files: File[]): void {
   batchRequestMap.clear();
   originalSvg = null;
   optimizedSvg = null;
+  optimizedSvgStale = false;
+  resetAnalysisState();
 
   dropzone.hidden = true;
   workspace.hidden = true;
@@ -907,18 +1508,19 @@ function processBatchQueue(): void {
   batchFiles[idx].status = "processing";
   updateBatchRow(idx);
 
-  pendingRequestId++;
-  batchRequestMap.set(pendingRequestId, idx);
+  const requestId = ++nextWorkerRequestId;
+  batchRequestMap.set(requestId, idx);
 
   worker.postMessage({
-    id: pendingRequestId,
+    kind: "optimize",
+    id: requestId,
     svgString: batchFiles[idx].originalContent,
     pluginStates,
     globalOptions,
   });
 }
 
-function handleBatchResponse(batchIdx: number, data: WorkerResponse): void {
+function handleBatchResponse(batchIdx: number, data: OptimizeWorkerResponse): void {
   batchQueue.shift();
 
   if (data.success) {
@@ -1060,21 +1662,28 @@ function downloadBatchFile(idx: number): void {
 
 function openBatchFileInWorkspace(idx: number): void {
   const f = batchFiles[idx];
+  const hasOptimizedResult = f.status === "done" && f.optimizedContent !== null;
   batchView.hidden = true;
   btnBackToBatch.hidden = false;
 
   // Populate the original side
   originalSvg = f.originalContent;
+  optimizedSvg = f.status === "done" ? f.optimizedContent : null;
+  optimizedSvgStale = false;
   originalFileName = f.name.replace(/\.svg$/i, "") + "-optimized.svg";
   dropzone.hidden = true;
   workspace.hidden = false;
   svgDisplayOriginal.innerHTML = f.originalContent;
+  svgDisplayOptimized.innerHTML = '<div class="loading-spinner"><div class="spinner-ring"></div></div>';
   codeOriginal.textContent = f.originalContent;
+  resetAnalysisState();
+  codeOptimized.textContent = optimizedSvg ?? "";
+  refreshAllAnalysisViews();
 
-  if (f.status === "done" && f.optimizedContent !== null) {
+  if (hasOptimizedResult) {
     // Result already computed — display it directly, no worker call
     applyOptimizationResult({
-      data: f.optimizedContent,
+      data: f.optimizedContent!,
       originalSize: f.originalSize,
       optimizedSize: f.optimizedSize!,
       savings: f.savings!,
@@ -1092,6 +1701,9 @@ function goBackToBatch(): void {
   batchStaleBanner.hidden = !batchSettingsStale;
   originalSvg = null;
   optimizedSvg = null;
+  optimizedSvgStale = false;
+  resetAnalysisState();
+  refreshAllAnalysisViews();
 }
 
 async function downloadZip(): Promise<void> {
@@ -1124,13 +1736,21 @@ btnBatchClear.addEventListener("click", () => {
   batchFiles = [];
   batchQueue = [];
   batchRequestMap.clear();
+  originalSvg = null;
+  optimizedSvg = null;
+  optimizedSvgStale = false;
+  resetAnalysisState();
   batchList.innerHTML = "";
   batchView.hidden = true;
   btnDownloadZip.disabled = true;
   dropzone.hidden = false;
+  workspace.hidden = true;
+  btnBackToBatch.hidden = true;
+  refreshAllAnalysisViews();
 });
 
 btnBackToBatch.addEventListener("click", goBackToBatch);
 
 // ─── Init ──────────────────────────────────────────────────────────────────
 buildSidebar();
+refreshAllAnalysisViews();
