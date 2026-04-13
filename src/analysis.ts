@@ -17,8 +17,11 @@ export interface AttributeBucket {
 export interface HeavyNode {
   selector: string;
   label: string;
+  tagName: string;
   bytes: number;
   note?: string;
+  rasterizable: boolean;
+  pathDataBytes?: number;
 }
 
 export interface EmbeddedRaster {
@@ -30,6 +33,11 @@ export interface EmbeddedRaster {
   decodedBytes: number | null;
   width: number | null;
   height: number | null;
+  managedByTool: boolean;
+  sourceSelector: string | null;
+  rasterFormat: "png" | "webp" | null;
+  rasterScale: number | null;
+  rasterQuality: number | null;
 }
 
 export interface SvgAnalysis {
@@ -175,8 +183,14 @@ function walkNode(
   heavyNodes.push({
     selector,
     label: buildElementLabel(node),
+    tagName: node.name,
     bytes: subtreeBytes,
     note: buildNodeNote(node, subtreeBytes, attributeBytes),
+    rasterizable: node.name === "path" && typeof node.attributes.d === "string",
+    pathDataBytes:
+      node.name === "path" && typeof node.attributes.d === "string"
+        ? byteLength(node.attributes.d)
+        : undefined,
   });
 
   const href = node.attributes.href ?? node.attributes["xlink:href"];
@@ -347,6 +361,11 @@ function analyzeRasterHref(
     decodedBytes,
     width: parseDimension(node.attributes.width),
     height: parseDimension(node.attributes.height),
+    managedByTool: Boolean(node.attributes["data-raster-selector"]),
+    sourceSelector: node.attributes["data-raster-selector"] ?? null,
+    rasterFormat: parseRasterFormat(node.attributes["data-raster-format"]),
+    rasterScale: parseRasterNumber(node.attributes["data-raster-scale"]),
+    rasterQuality: parseRasterNumber(node.attributes["data-raster-quality"]),
   };
 }
 
@@ -356,6 +375,16 @@ function parseDimension(value: string | undefined): number | null {
   if (!match) return null;
   const parsed = Number(match[0]);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseRasterNumber(value: string | undefined): number | null {
+  if (!value) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseRasterFormat(value: string | undefined): EmbeddedRaster["rasterFormat"] {
+  return value === "png" || value === "webp" ? value : null;
 }
 
 function collectNumericLiterals(value: string, histogram: number[]): void {

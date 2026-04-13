@@ -217,6 +217,66 @@
       </div>
     </div>
 
+    <!-- Modal rasterisation manuelle -->
+    <div class="modal-overlay hidden" id="modal-rasterize">
+      <div class="modal modal-rasterize">
+        <div class="modal-header">
+          <span class="modal-title">Rasteriser un path</span>
+          <button class="modal-close" id="rasterize-close">✕</button>
+        </div>
+        <div class="rasterize-body">
+          <div class="rasterize-note">
+            Le path sera remplacé par une image embarquée dans le SVG optimisé. Le fichier reste autonome, mais le rendu ne sera plus vectoriel sur cette zone.
+          </div>
+          <div class="rasterize-target">
+            <div class="rasterize-target-label">Nœud sélectionné</div>
+            <div class="rasterize-target-value" id="rasterize-selection">—</div>
+            <div class="rasterize-target-meta" id="rasterize-selection-meta">—</div>
+          </div>
+          <div class="rasterize-grid">
+            <label class="rasterize-field">
+              <span class="rasterize-field-label">Format</span>
+              <select id="rasterize-format" class="rasterize-select">
+                <option value="png">PNG</option>
+                <option value="webp">WebP</option>
+              </select>
+            </label>
+            <label class="rasterize-field">
+              <span class="rasterize-field-label">Échelle</span>
+              <input
+                type="number"
+                id="rasterize-scale"
+                class="rasterize-input"
+                min="1"
+                max="8"
+                step="0.25"
+                value="2"
+              />
+            </label>
+            <label class="rasterize-field" id="rasterize-quality-field">
+              <span class="rasterize-field-label">Qualité WebP</span>
+              <input
+                type="number"
+                id="rasterize-quality"
+                class="rasterize-input"
+                min="0.1"
+                max="1"
+                step="0.05"
+                value="0.92"
+              />
+            </label>
+          </div>
+          <div class="rasterize-help" id="rasterize-help">
+            Plus l’échelle est élevée, plus le rendu reste net, mais plus l’image embarquée risque d’être lourde.
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-ghost" id="btn-rasterize-cancel">Annuler</button>
+          <button class="btn btn-primary" id="btn-rasterize-confirm">Rasteriser</button>
+        </div>
+      </div>
+    </div>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
