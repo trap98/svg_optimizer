@@ -505,6 +505,7 @@ html, body {
 /* Output tabs */
 .output-tabs {
   display: flex;
+  align-items: center;
   border-bottom: 1px solid var(--border);
   background: var(--bg-2);
   flex-shrink: 0;
@@ -531,6 +532,10 @@ html, body {
   border-bottom-color: var(--accent);
 }
 
+.output-tabs-toggle {
+  margin-left: auto;
+}
+
 /* Output panels */
 .output-panel {
   flex: 1;
@@ -545,7 +550,7 @@ html, body {
   display: flex;
 }
 
-.output-section.hidden { display: none; }
+.output-section.hidden { display: none !important; }
 
 /* SVG preview */
 #tab-preview {

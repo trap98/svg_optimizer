@@ -24,6 +24,7 @@ import {
 import type { AnalyzeWorkerResponse, OptimizeWorkerResponse, WorkerResponse } from "./worker";
 
 type AnalysisSource = "original" | "optimized";
+type OutputTab = "preview" | "code" | "analysis";
 
 interface AnalysisCacheEntry {
   svg: string | null;
@@ -329,6 +330,7 @@ const pluginsList = document.getElementById("plugins-list")!;
 const btnCopy = document.getElementById("btn-copy") as HTMLButtonElement;
 const btnDownload = document.getElementById("btn-download") as HTMLButtonElement;
 const btnNew = document.getElementById("btn-new") as HTMLButtonElement;
+const btnToggleTabPreview = document.getElementById("btn-toggle-tab-preview") as HTMLButtonElement;
 const btnEnableAll = document.getElementById("btn-enable-all") as HTMLButtonElement;
 const btnDisableAll = document.getElementById("btn-disable-all") as HTMLButtonElement;
 const btnReset = document.getElementById("btn-reset") as HTMLButtonElement;
@@ -1064,22 +1066,43 @@ btnDownload.addEventListener("click", () => {
 
 // ─── Tabs ──────────────────────────────────────────────────────────────────
 const tabs = document.querySelectorAll<HTMLButtonElement>(".tab");
-const tabPanels: Record<string, HTMLElement> = {
+const tabPanels: Record<OutputTab, HTMLElement> = {
   preview: document.getElementById("tab-preview")!,
   code: document.getElementById("tab-code")!,
   analysis: document.getElementById("tab-analysis")!,
 };
+let activeOutputTab: OutputTab = "preview";
+let isDetailPreviewHidden = false;
+
+function syncOutputTabs(): void {
+  tabs.forEach((tab) => {
+    tab.classList.toggle("active", tab.dataset.tab === activeOutputTab);
+  });
+
+  const isDetailTab = activeOutputTab !== "preview";
+  btnToggleTabPreview.hidden = !isDetailTab;
+  btnToggleTabPreview.textContent = isDetailPreviewHidden ? "Afficher l’aperçu" : "Masquer l’aperçu";
+  btnToggleTabPreview.setAttribute("aria-pressed", String(isDetailPreviewHidden));
+
+  tabPanels.preview.classList.toggle("hidden", isDetailTab && isDetailPreviewHidden);
+  tabPanels.code.classList.toggle("hidden", activeOutputTab !== "code");
+  tabPanels.analysis.classList.toggle("hidden", activeOutputTab !== "analysis");
+}
 
 tabs.forEach((tab) => {
   tab.addEventListener("click", () => {
-    tabs.forEach((t) => t.classList.remove("active"));
-    tab.classList.add("active");
-    const target = tab.dataset.tab!;
-    for (const [key, panel] of Object.entries(tabPanels)) {
-      panel.classList.toggle("hidden", key !== target);
-    }
+    activeOutputTab = tab.dataset.tab as OutputTab;
+    syncOutputTabs();
   });
 });
+
+btnToggleTabPreview.addEventListener("click", () => {
+  if (activeOutputTab === "preview") return;
+  isDetailPreviewHidden = !isDetailPreviewHidden;
+  syncOutputTabs();
+});
+
+syncOutputTabs();
 
 interface PotentialGain {
   level: "opportunity" | "warning" | "info";
