@@ -8,9 +8,11 @@ import {
   type PluginState,
   getDefaultStates,
   loadGlobalOptions,
+  loadPreviewCss,
   loadPluginStates,
   savePluginStates,
   saveGlobalOptions,
+  savePreviewCss,
 } from "./settings";
 import { formatBytes, type OptimizeResult } from "./optimizer";
 import {
@@ -66,8 +68,21 @@ interface ApplyOptimizationResultOptions {
   preserveManualRasterizations?: boolean;
 }
 
+interface PreviewSelectorCatalog {
+  classes: string[];
+  ids: string[];
+}
+
+interface PreviewCssAutocompleteContext {
+  token: string;
+  start: number;
+  end: number;
+  type: "class" | "id";
+}
+
 const SVG_NS = "http://www.w3.org/2000/svg";
 const XLINK_NS = "http://www.w3.org/1999/xlink";
+const PREVIEW_CSS_ATTRIBUTE = "data-preview-css-injected";
 
 // ─── Worker setup ───────────────────────────────────────────────────────────
 const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
@@ -128,14 +143,14 @@ function applyOptimizationResult(
     result.savings >= 0 ? `−${result.savings}%` : `+${Math.abs(result.savings)}%`;
   statSavings.classList.toggle("negative", result.savings < 0);
 
-  svgDisplayOptimized.innerHTML =
-    result.data + '<div class="loading-spinner"><div class="spinner-ring"></div></div>';
+  renderSvgPreview(svgDisplayOptimized, result.data, { includeSpinner: true });
   codeOptimized.textContent = result.data;
 
   btnCopy.disabled = false;
   btnDownload.disabled = false;
 
   syncActiveBatchOptimization(result);
+  refreshPreviewSelectorCatalog();
   refreshAllAnalysisViews();
 }
 
@@ -280,6 +295,7 @@ function handleAnalysisResponse(response: AnalyzeWorkerResponse): void {
 let pluginStates: PluginState = loadPluginStates();
 let globalOptions: GlobalOptions = loadGlobalOptions();
 let presets: Preset[] = loadPresets();
+let previewCss = loadPreviewCss();
 let originalSvg: string | null = null;
 let optimizedSvg: string | null = null;
 let baseOptimizedSvg: string | null = null;
@@ -288,6 +304,9 @@ let originalFileName = "optimized.svg";
 let activeBatchWorkspaceIdx: number | null = null;
 let pendingRasterizeSelection: RasterizeSelection | null = null;
 let manualRasterEdits: RasterizationEdit[] = [];
+let previewSelectorCatalog: PreviewSelectorCatalog = { classes: [], ids: [] };
+let previewCssSuggestionValues: string[] = [];
+let activePreviewCssSuggestionIdx = 0;
 const analysisCache: Record<AnalysisSource, AnalysisCacheEntry> = {
   original: { svg: null, result: null },
   optimized: { svg: null, result: null },
@@ -335,6 +354,7 @@ const btnEnableAll = document.getElementById("btn-enable-all") as HTMLButtonElem
 const btnDisableAll = document.getElementById("btn-disable-all") as HTMLButtonElement;
 const btnReset = document.getElementById("btn-reset") as HTMLButtonElement;
 const btnPasteOpen = document.getElementById("btn-paste-open") as HTMLButtonElement;
+const btnPreviewCssOpen = document.getElementById("btn-preview-css") as HTMLButtonElement;
 
 const btnPresetsOpen = document.getElementById("btn-presets") as HTMLButtonElement;
 const modalPresets = document.getElementById("modal-presets")!;
@@ -369,6 +389,19 @@ const pasteTextarea = document.getElementById("paste-textarea") as HTMLTextAreaE
 const btnPasteConfirm = document.getElementById("btn-paste-confirm") as HTMLButtonElement;
 const btnPasteCancel = document.getElementById("btn-paste-cancel") as HTMLButtonElement;
 const modalClose = document.getElementById("modal-close") as HTMLButtonElement;
+const modalPreviewCss = document.getElementById("modal-preview-css")!;
+const previewCssClose = document.getElementById("preview-css-close") as HTMLButtonElement;
+const previewCssTextarea = document.getElementById("preview-css-textarea") as HTMLTextAreaElement;
+const previewCssFileContext = document.getElementById("preview-css-file-context")!;
+const previewCssAutocomplete = document.getElementById("preview-css-autocomplete")!;
+const previewCssAutocompleteList = document.getElementById("preview-css-autocomplete-list")!;
+const previewCssAutocompleteEmpty = document.getElementById("preview-css-autocomplete-empty")!;
+const previewCssClasses = document.getElementById("preview-css-classes")!;
+const previewCssIds = document.getElementById("preview-css-ids")!;
+const previewCssClassesCount = document.getElementById("preview-css-classes-count")!;
+const previewCssIdsCount = document.getElementById("preview-css-ids-count")!;
+const btnPreviewCssReset = document.getElementById("btn-preview-css-reset") as HTMLButtonElement;
+const btnPreviewCssDone = document.getElementById("btn-preview-css-done") as HTMLButtonElement;
 const modalRasterize = document.getElementById("modal-rasterize")!;
 const rasterizeClose = document.getElementById("rasterize-close") as HTMLButtonElement;
 const rasterizeSelectionEl = document.getElementById("rasterize-selection")!;
@@ -380,6 +413,300 @@ const rasterizeQualityInput = document.getElementById("rasterize-quality") as HT
 const rasterizeHelp = document.getElementById("rasterize-help")!;
 const btnRasterizeCancel = document.getElementById("btn-rasterize-cancel") as HTMLButtonElement;
 const btnRasterizeConfirm = document.getElementById("btn-rasterize-confirm") as HTMLButtonElement;
+
+function createLoadingSpinner(): HTMLElement {
+  const spinner = document.createElement("div");
+  spinner.className = "loading-spinner";
+
+  const ring = document.createElement("div");
+  ring.className = "spinner-ring";
+  spinner.appendChild(ring);
+
+  return spinner;
+}
+
+function getMountedSvgRoot(container: HTMLElement): SVGSVGElement | null {
+  const firstSvg = Array.from(container.children).find(
+    (child) => child instanceof SVGSVGElement
+  );
+  return firstSvg instanceof SVGSVGElement ? firstSvg : null;
+}
+
+function getInjectedPreviewStyle(root: SVGSVGElement): SVGStyleElement | null {
+  const styleNode = Array.from(root.children).find(
+    (child) => child instanceof SVGElement &&
+      child.localName === "style" &&
+      child.hasAttribute(PREVIEW_CSS_ATTRIBUTE)
+  );
+  return (styleNode as SVGStyleElement | undefined) ?? null;
+}
+
+function applyPreviewCssToMountedPreview(container: HTMLElement): void {
+  const root = getMountedSvgRoot(container);
+  if (!root) return;
+
+  const css = previewCss.trim();
+  const existingStyle = getInjectedPreviewStyle(root);
+
+  if (!css) {
+    existingStyle?.remove();
+    return;
+  }
+
+  if (existingStyle) {
+    existingStyle.textContent = css;
+    return;
+  }
+
+  const style = document.createElementNS(SVG_NS, "style") as SVGStyleElement;
+  style.setAttribute(PREVIEW_CSS_ATTRIBUTE, "1");
+  style.textContent = css;
+  root.insertBefore(style, root.firstChild);
+}
+
+function renderPreviewLoadingState(container: HTMLElement): void {
+  container.replaceChildren(createLoadingSpinner());
+}
+
+function renderSvgPreview(
+  container: HTMLElement,
+  svgMarkup: string,
+  options: { includeSpinner?: boolean } = {}
+): void {
+  const parsedRoot = parseSvgRoot(svgMarkup);
+  const spinner = options.includeSpinner ? createLoadingSpinner() : null;
+
+  if (parsedRoot) {
+    const importedRoot = document.importNode(parsedRoot, true) as SVGSVGElement;
+    container.replaceChildren(importedRoot);
+    applyPreviewCssToMountedPreview(container);
+    if (spinner) container.appendChild(spinner);
+    return;
+  }
+
+  container.innerHTML = svgMarkup;
+  applyPreviewCssToMountedPreview(container);
+  if (spinner) container.appendChild(spinner);
+}
+
+function syncPreviewDisplays(): void {
+  if (originalSvg) {
+    renderSvgPreview(svgDisplayOriginal, originalSvg);
+  } else {
+    svgDisplayOriginal.replaceChildren();
+  }
+
+  if (optimizedSvg) {
+    renderSvgPreview(svgDisplayOptimized, optimizedSvg, { includeSpinner: true });
+  } else if (originalSvg) {
+    renderPreviewLoadingState(svgDisplayOptimized);
+  } else {
+    svgDisplayOptimized.replaceChildren();
+  }
+}
+
+function collectPreviewSelectorsFromSvg(
+  svgMarkup: string | null,
+  classes: Set<string>,
+  ids: Set<string>
+): void {
+  if (!svgMarkup) return;
+
+  const root = parseSvgRoot(svgMarkup);
+  if (!root) return;
+
+  const elements = [root, ...Array.from(root.querySelectorAll("*"))];
+  for (const element of elements) {
+    const id = element.getAttribute("id")?.trim();
+    if (id) ids.add(`#${id}`);
+
+    const rawClassName = element.getAttribute("class");
+    if (!rawClassName) continue;
+
+    for (const className of rawClassName.split(/\s+/)) {
+      if (className) classes.add(`.${className}`);
+    }
+  }
+}
+
+function sortSelectors(values: Set<string>): string[] {
+  return [...values].sort((a, b) => a.localeCompare(b, "fr", { sensitivity: "base" }));
+}
+
+function refreshPreviewSelectorCatalog(): void {
+  const classes = new Set<string>();
+  const ids = new Set<string>();
+
+  collectPreviewSelectorsFromSvg(originalSvg, classes, ids);
+  collectPreviewSelectorsFromSvg(optimizedSvg, classes, ids);
+
+  previewSelectorCatalog = {
+    classes: sortSelectors(classes),
+    ids: sortSelectors(ids),
+  };
+
+  renderPreviewSelectorLists();
+  syncPreviewCssAutocomplete();
+}
+
+function syncPreviewCssButtonState(): void {
+  btnPreviewCssOpen.classList.toggle("is-active", previewCss.trim().length > 0);
+}
+
+function setPreviewCss(nextCss: string): void {
+  previewCss = nextCss;
+  savePreviewCss(previewCss);
+  syncPreviewCssButtonState();
+  applyPreviewCssToMountedPreview(svgDisplayOriginal);
+  applyPreviewCssToMountedPreview(svgDisplayOptimized);
+}
+
+function renderPreviewSelectorGroup(
+  container: HTMLElement,
+  values: string[],
+  emptyMessage: string
+): void {
+  container.replaceChildren();
+
+  if (values.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "preview-css-selector-empty";
+    empty.textContent = emptyMessage;
+    container.appendChild(empty);
+    return;
+  }
+
+  for (const value of values) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "preview-css-selector-chip";
+    button.textContent = value;
+    button.addEventListener("click", () => {
+      insertPreviewCssValue(value);
+    });
+    container.appendChild(button);
+  }
+}
+
+function renderPreviewSelectorLists(): void {
+  const hasSvgContext = Boolean(originalSvg || optimizedSvg);
+  previewCssClassesCount.textContent = String(previewSelectorCatalog.classes.length);
+  previewCssIdsCount.textContent = String(previewSelectorCatalog.ids.length);
+  previewCssFileContext.textContent = hasSvgContext
+    ? `${previewSelectorCatalog.classes.length} classes et ${previewSelectorCatalog.ids.length} ids detectes sur le fichier courant. Le CSS reste applique d'un fichier a l'autre.`
+    : "Le CSS est injecte uniquement dans les apercus. Chargez un SVG pour obtenir l'autocompletion des classes et ids.";
+
+  renderPreviewSelectorGroup(
+    previewCssClasses,
+    previewSelectorCatalog.classes,
+    "Aucune classe detectee."
+  );
+  renderPreviewSelectorGroup(previewCssIds, previewSelectorCatalog.ids, "Aucun id detecte.");
+}
+
+function getPreviewCssAutocompleteContext(): PreviewCssAutocompleteContext | null {
+  if (document.activeElement !== previewCssTextarea) return null;
+  if (previewCssTextarea.selectionStart !== previewCssTextarea.selectionEnd) return null;
+
+  const cursor = previewCssTextarea.selectionStart;
+  const beforeCursor = previewCssTextarea.value.slice(0, cursor);
+  const afterCursor = previewCssTextarea.value.slice(cursor);
+  const match = beforeCursor.match(/(?:^|[\s,{>+~:(])([.#](?:[-_a-zA-Z][-_a-zA-Z0-9-]*)?)$/);
+
+  if (!match) return null;
+
+  const token = match[1];
+  const suffix = afterCursor.match(/^[-_a-zA-Z0-9-]*/)?.[0] ?? "";
+
+  return {
+    token,
+    start: cursor - token.length,
+    end: cursor + suffix.length,
+    type: token.startsWith(".") ? "class" : "id",
+  };
+}
+
+function syncPreviewCssAutocomplete(): void {
+  const context = getPreviewCssAutocompleteContext();
+  if (!context) {
+    previewCssAutocomplete.hidden = true;
+    previewCssSuggestionValues = [];
+    activePreviewCssSuggestionIdx = 0;
+    return;
+  }
+
+  const pool = context.type === "class" ? previewSelectorCatalog.classes : previewSelectorCatalog.ids;
+  const token = context.token.toLocaleLowerCase();
+  previewCssSuggestionValues = pool
+    .filter((value) => value.toLocaleLowerCase().startsWith(token))
+    .slice(0, 8);
+  activePreviewCssSuggestionIdx = Math.min(
+    activePreviewCssSuggestionIdx,
+    Math.max(previewCssSuggestionValues.length - 1, 0)
+  );
+
+  previewCssAutocomplete.hidden = false;
+  previewCssAutocompleteList.replaceChildren();
+
+  for (const [index, value] of previewCssSuggestionValues.entries()) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "preview-css-autocomplete-item";
+    if (index === activePreviewCssSuggestionIdx) button.classList.add("is-active");
+    button.textContent = value;
+    button.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      applyPreviewCssSuggestion(value);
+    });
+    previewCssAutocompleteList.appendChild(button);
+  }
+
+  previewCssAutocompleteEmpty.hidden = previewCssSuggestionValues.length > 0;
+}
+
+function replacePreviewCssRange(start: number, end: number, value: string): void {
+  const nextValue =
+    `${previewCssTextarea.value.slice(0, start)}${value}${previewCssTextarea.value.slice(end)}`;
+  previewCssTextarea.value = nextValue;
+  previewCssTextarea.focus();
+  previewCssTextarea.setSelectionRange(start + value.length, start + value.length);
+  setPreviewCss(nextValue);
+  syncPreviewCssAutocomplete();
+}
+
+function insertPreviewCssValue(value: string): void {
+  const context = getPreviewCssAutocompleteContext();
+  if (context && context.type === (value.startsWith(".") ? "class" : "id")) {
+    replacePreviewCssRange(context.start, context.end, value);
+    return;
+  }
+
+  replacePreviewCssRange(
+    previewCssTextarea.selectionStart,
+    previewCssTextarea.selectionEnd,
+    value
+  );
+}
+
+function applyPreviewCssSuggestion(value: string): void {
+  const context = getPreviewCssAutocompleteContext();
+  if (!context) return;
+  replacePreviewCssRange(context.start, context.end, value);
+}
+
+function openPreviewCssModal(): void {
+  previewCssTextarea.value = previewCss;
+  refreshPreviewSelectorCatalog();
+  modalPreviewCss.classList.remove("hidden");
+  previewCssTextarea.focus();
+  previewCssTextarea.setSelectionRange(previewCssTextarea.value.length, previewCssTextarea.value.length);
+  syncPreviewCssAutocomplete();
+}
+
+function closePreviewCssModal(): void {
+  modalPreviewCss.classList.add("hidden");
+  previewCssAutocomplete.hidden = true;
+}
 
 // ─── Build sidebar ──────────────────────────────────────────────────────────
 function buildSidebar(): void {
@@ -654,13 +981,14 @@ function loadSvg(content: string, filename = "optimized.svg"): void {
   activeBatchWorkspaceIdx = null;
   dropzone.hidden = true;
   workspace.hidden = false;
-  svgDisplayOriginal.innerHTML = content;
-  svgDisplayOptimized.innerHTML = '<div class="loading-spinner"><div class="spinner-ring"></div></div>';
+  renderSvgPreview(svgDisplayOriginal, content);
+  renderPreviewLoadingState(svgDisplayOptimized);
   codeOriginal.textContent = content;
   codeOptimized.textContent = "";
   btnCopy.disabled = true;
   btnDownload.disabled = true;
   resetAnalysisState();
+  refreshPreviewSelectorCatalog();
   refreshAllAnalysisViews();
   scheduleOptimization(0); // immediate on first load
 }
@@ -766,6 +1094,61 @@ document.addEventListener("paste", (e) => {
   if (!dropzone.hidden) return;
   const text = e.clipboardData?.getData("text/plain") ?? "";
   if (text.includes("<svg")) loadSvg(text, "pasted.svg");
+});
+
+btnPreviewCssOpen.addEventListener("click", openPreviewCssModal);
+previewCssClose.addEventListener("click", closePreviewCssModal);
+btnPreviewCssDone.addEventListener("click", closePreviewCssModal);
+btnPreviewCssReset.addEventListener("click", () => {
+  previewCssTextarea.value = "";
+  setPreviewCss("");
+  syncPreviewCssAutocomplete();
+  previewCssTextarea.focus();
+});
+modalPreviewCss.addEventListener("click", (event) => {
+  if (event.target === modalPreviewCss) closePreviewCssModal();
+});
+previewCssTextarea.addEventListener("input", () => {
+  setPreviewCss(previewCssTextarea.value);
+  syncPreviewCssAutocomplete();
+});
+previewCssTextarea.addEventListener("click", syncPreviewCssAutocomplete);
+previewCssTextarea.addEventListener("keyup", syncPreviewCssAutocomplete);
+previewCssTextarea.addEventListener("focus", syncPreviewCssAutocomplete);
+previewCssTextarea.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    if (!previewCssAutocomplete.hidden) {
+      previewCssAutocomplete.hidden = true;
+      return;
+    }
+    closePreviewCssModal();
+    return;
+  }
+
+  if (previewCssAutocomplete.hidden || previewCssSuggestionValues.length === 0) return;
+
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    activePreviewCssSuggestionIdx =
+      (activePreviewCssSuggestionIdx + 1) % previewCssSuggestionValues.length;
+    syncPreviewCssAutocomplete();
+    return;
+  }
+
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    activePreviewCssSuggestionIdx =
+      (activePreviewCssSuggestionIdx - 1 + previewCssSuggestionValues.length) %
+      previewCssSuggestionValues.length;
+    syncPreviewCssAutocomplete();
+    return;
+  }
+
+  if (event.key === "Tab" || event.key === "Enter") {
+    event.preventDefault();
+    applyPreviewCssSuggestion(previewCssSuggestionValues[activePreviewCssSuggestionIdx]);
+  }
 });
 
 function syncRasterizeQualityVisibility(): void {
@@ -1028,10 +1411,10 @@ btnNew.addEventListener("click", () => {
   dropzone.hidden = false;
   btnCopy.disabled = true;
   btnDownload.disabled = true;
-  svgDisplayOriginal.innerHTML = "";
-  svgDisplayOptimized.innerHTML = "";
+  syncPreviewDisplays();
   codeOriginal.textContent = "";
   codeOptimized.textContent = "";
+  refreshPreviewSelectorCatalog();
   refreshAllAnalysisViews();
 });
 
@@ -2520,11 +2903,11 @@ function openBatchFileInWorkspace(idx: number): void {
   originalFileName = f.name.replace(/\.svg$/i, "") + "-optimized.svg";
   dropzone.hidden = true;
   workspace.hidden = false;
-  svgDisplayOriginal.innerHTML = f.originalContent;
-  svgDisplayOptimized.innerHTML = '<div class="loading-spinner"><div class="spinner-ring"></div></div>';
   codeOriginal.textContent = f.originalContent;
   resetAnalysisState();
   codeOptimized.textContent = optimizedSvg ?? "";
+  syncPreviewDisplays();
+  refreshPreviewSelectorCatalog();
   refreshAllAnalysisViews();
 
   if (hasOptimizedResult) {
@@ -2552,6 +2935,8 @@ function goBackToBatch(): void {
   optimizedSvgStale = false;
   activeBatchWorkspaceIdx = null;
   resetAnalysisState();
+  syncPreviewDisplays();
+  refreshPreviewSelectorCatalog();
   refreshAllAnalysisViews();
 }
 
@@ -2595,6 +2980,8 @@ btnBatchClear.addEventListener("click", () => {
   dropzone.hidden = false;
   workspace.hidden = true;
   btnBackToBatch.hidden = true;
+  syncPreviewDisplays();
+  refreshPreviewSelectorCatalog();
   refreshAllAnalysisViews();
 });
 
@@ -2602,4 +2989,6 @@ btnBackToBatch.addEventListener("click", goBackToBatch);
 
 // ─── Init ──────────────────────────────────────────────────────────────────
 buildSidebar();
+syncPreviewCssButtonState();
+renderPreviewSelectorLists();
 refreshAllAnalysisViews();

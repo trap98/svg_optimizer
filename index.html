@@ -15,6 +15,7 @@
         </div>
         <div class="header-actions">
           <button id="btn-presets" class="btn btn-secondary">Préréglages</button>
+          <button id="btn-preview-css" class="btn btn-secondary">CSS aperçu</button>
           <button id="btn-copy" class="btn btn-secondary" disabled>Copier SVG</button>
           <button id="btn-download" class="btn btn-primary" disabled>Télécharger</button>
         </div>
@@ -187,6 +188,63 @@
         <div class="modal-footer">
           <button class="btn btn-ghost" id="btn-paste-cancel">Annuler</button>
           <button class="btn btn-primary" id="btn-paste-confirm">Optimiser</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal CSS injecte -->
+    <div class="modal-overlay hidden" id="modal-preview-css">
+      <div class="modal modal-preview-css">
+        <div class="modal-header">
+          <span class="modal-title">CSS injecte dans les apercus</span>
+          <button class="modal-close" id="preview-css-close">✕</button>
+        </div>
+        <div class="preview-css-body">
+          <div class="preview-css-note" id="preview-css-file-context">
+            Le CSS est injecte uniquement dans les apercus. Il n'est ni ecrit dans le SVG, ni inclus au telechargement.
+          </div>
+          <div class="preview-css-layout">
+            <div class="preview-css-editor-pane">
+              <div class="preview-css-editor-wrap">
+                <textarea
+                  class="modal-textarea preview-css-textarea"
+                  id="preview-css-textarea"
+                  placeholder=".icon {\n  fill: currentColor;\n}\n\n#badge {\n  opacity: 0.72;\n}"
+                  spellcheck="false"
+                ></textarea>
+                <div class="preview-css-autocomplete" id="preview-css-autocomplete" hidden>
+                  <div class="preview-css-autocomplete-label">Autocompletion</div>
+                  <div class="preview-css-autocomplete-list" id="preview-css-autocomplete-list"></div>
+                  <div class="preview-css-autocomplete-empty" id="preview-css-autocomplete-empty" hidden>
+                    Aucun selecteur correspondant dans le SVG courant.
+                  </div>
+                </div>
+              </div>
+              <div class="preview-css-help">
+                Suggestions disponibles sur <code>.</code> et <code>#</code>. Utilisez <code>Tab</code> ou <code>Entree</code> pour inserer la suggestion selectionnee.
+              </div>
+            </div>
+            <aside class="preview-css-selectors">
+              <div class="preview-css-selector-group">
+                <div class="preview-css-selector-header">
+                  <span class="preview-css-selector-title">Classes</span>
+                  <span class="preview-css-selector-count" id="preview-css-classes-count">0</span>
+                </div>
+                <div class="preview-css-selector-list" id="preview-css-classes"></div>
+              </div>
+              <div class="preview-css-selector-group">
+                <div class="preview-css-selector-header">
+                  <span class="preview-css-selector-title">IDs</span>
+                  <span class="preview-css-selector-count" id="preview-css-ids-count">0</span>
+                </div>
+                <div class="preview-css-selector-list" id="preview-css-ids"></div>
+              </div>
+            </aside>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-ghost" id="btn-preview-css-reset">Effacer</button>
+          <button class="btn btn-primary" id="btn-preview-css-done">Fermer</button>
         </div>
       </div>
     </div>

@@ -20,6 +20,7 @@ export const DEFAULT_GLOBAL_OPTIONS: GlobalOptions = {
 
 const STORAGE_KEY_PLUGINS = "svgo-optimizer-plugin-states";
 const STORAGE_KEY_GLOBALS = "svgo-optimizer-global-options";
+const STORAGE_KEY_PREVIEW_CSS = "svgo-optimizer-preview-css";
 
 export function loadPluginStates(): PluginState {
   try {
@@ -66,4 +67,16 @@ export function loadGlobalOptions(): GlobalOptions {
 
 export function saveGlobalOptions(opts: GlobalOptions): void {
   localStorage.setItem(STORAGE_KEY_GLOBALS, JSON.stringify(opts));
+}
+
+export function loadPreviewCss(): string {
+  try {
+    return localStorage.getItem(STORAGE_KEY_PREVIEW_CSS) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export function savePreviewCss(value: string): void {
+  localStorage.setItem(STORAGE_KEY_PREVIEW_CSS, value);
 }
