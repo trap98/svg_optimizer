@@ -128,11 +128,23 @@
               <div class="output-section" id="tab-preview">
                 <div class="svg-viewer" id="svg-viewer-original">
                   <div class="svg-viewer-label">Original</div>
-                  <div class="svg-display" id="svg-display-original"></div>
+                  <div
+                    class="svg-display preview-openable"
+                    id="svg-display-original"
+                    role="button"
+                    tabindex="0"
+                    aria-label="Ouvrir l’aperçu original en grand"
+                  ></div>
                 </div>
                 <div class="svg-viewer" id="svg-viewer-optimized">
                   <div class="svg-viewer-label">Optimisé</div>
-                  <div class="svg-display" id="svg-display-optimized">
+                  <div
+                    class="svg-display preview-openable"
+                    id="svg-display-optimized"
+                    role="button"
+                    tabindex="0"
+                    aria-label="Ouvrir l’aperçu optimisé en grand"
+                  >
                     <div class="loading-spinner"><div class="spinner-ring"></div></div>
                   </div>
                 </div>
@@ -304,7 +316,7 @@
               <span class="rasterize-field-label">Format</span>
               <select id="rasterize-format" class="rasterize-select">
                 <option value="png">PNG</option>
-                <option value="webp">WebP</option>
+                <option value="webp" selected>WebP</option>
               </select>
             </label>
             <label class="rasterize-field">
@@ -313,9 +325,31 @@
                 type="number"
                 id="rasterize-scale"
                 class="rasterize-input"
-                min="1"
-                max="8"
+                min="0.25"
+                max="16"
                 step="0.25"
+                value="2"
+              />
+            </label>
+            <label class="rasterize-field">
+              <span class="rasterize-field-label">Largeur raster</span>
+              <input
+                type="number"
+                id="rasterize-pixel-width"
+                class="rasterize-input"
+                min="1"
+                step="1"
+                value="2"
+              />
+            </label>
+            <label class="rasterize-field">
+              <span class="rasterize-field-label">Hauteur raster</span>
+              <input
+                type="number"
+                id="rasterize-pixel-height"
+                class="rasterize-input"
+                min="1"
+                step="1"
                 value="2"
               />
             </label>
@@ -332,13 +366,42 @@
               />
             </label>
           </div>
+          <div class="rasterize-dimensions">
+            <div class="rasterize-dimension-card">
+              <span class="rasterize-field-label">Cadre SVG</span>
+              <div class="rasterize-dimension-value" id="rasterize-source-size">—</div>
+            </div>
+            <div class="rasterize-dimension-card">
+              <span class="rasterize-field-label">Sortie raster</span>
+              <div class="rasterize-dimension-value" id="rasterize-output-size">—</div>
+            </div>
+          </div>
           <div class="rasterize-help" id="rasterize-help">
-            Plus l’échelle est élevée, plus le rendu reste net, mais plus l’image embarquée risque d’être lourde.
+            L’échelle ajuste la résolution du raster. La qualité WebP contrôle la compression : 0.92 privilégie le rendu, plus bas réduit davantage le poids.
           </div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-ghost" id="btn-rasterize-cancel">Annuler</button>
           <button class="btn btn-primary" id="btn-rasterize-confirm">Rasteriser</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal aperçu plein écran -->
+    <div class="modal-overlay hidden" id="modal-fullscreen-preview">
+      <div class="modal modal-preview-fullscreen">
+        <div class="modal-header">
+          <span class="modal-title">Aperçu plein écran</span>
+          <div class="fullscreen-preview-actions">
+            <span class="fullscreen-preview-source" id="fullscreen-preview-source">Original</span>
+            <button class="btn btn-secondary btn-sm" id="btn-fullscreen-preview-toggle" type="button">
+              Voir l’optimisé
+            </button>
+            <button class="modal-close" id="fullscreen-preview-close">✕</button>
+          </div>
+        </div>
+        <div class="fullscreen-preview-body">
+          <div class="svg-display fullscreen-preview-display" id="fullscreen-preview-display"></div>
         </div>
       </div>
     </div>

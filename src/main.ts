@@ -35,12 +35,21 @@ interface AnalysisCacheEntry {
 
 type RasterizeFormat = "png" | "webp";
 
+const DEFAULT_RASTERIZE_FORMAT: RasterizeFormat = "webp";
+const DEFAULT_RASTERIZE_SCALE = 2;
+const MIN_RASTERIZE_SCALE = 0.25;
+const MAX_RASTERIZE_SCALE = 16;
+const DEFAULT_WEBP_QUALITY = 0.92;
+const MIN_WEBP_QUALITY = 0.1;
+const MAX_WEBP_QUALITY = 1;
+
 interface RasterizeSelection {
   selector: string;
   label: string;
   note?: string;
   pathDataBytes?: number;
   existingOptions?: RasterizeOptions;
+  targetBounds: SvgCoordinateBox;
 }
 
 interface RasterizeOptions {
@@ -302,8 +311,10 @@ let baseOptimizedSvg: string | null = null;
 let optimizedSvgStale = false;
 let originalFileName = "optimized.svg";
 let activeBatchWorkspaceIdx: number | null = null;
+let activeFullscreenPreviewSource: AnalysisSource | null = null;
 let pendingRasterizeSelection: RasterizeSelection | null = null;
 let manualRasterEdits: RasterizationEdit[] = [];
+let isSyncingRasterizeFields = false;
 let previewSelectorCatalog: PreviewSelectorCatalog = { classes: [], ids: [] };
 let previewCssSuggestionValues: string[] = [];
 let activePreviewCssSuggestionIdx = 0;
@@ -373,6 +384,11 @@ const outputPanel = document.getElementById("output-panel")!;
 
 const svgDisplayOriginal = document.getElementById("svg-display-original")!;
 const svgDisplayOptimized = document.getElementById("svg-display-optimized")!;
+const modalFullscreenPreview = document.getElementById("modal-fullscreen-preview")!;
+const fullscreenPreviewClose = document.getElementById("fullscreen-preview-close") as HTMLButtonElement;
+const btnFullscreenPreviewToggle = document.getElementById("btn-fullscreen-preview-toggle") as HTMLButtonElement;
+const fullscreenPreviewSourceEl = document.getElementById("fullscreen-preview-source")!;
+const fullscreenPreviewDisplay = document.getElementById("fullscreen-preview-display")!;
 const codeOriginal = document.getElementById("code-original")!;
 const codeOptimized = document.getElementById("code-optimized")!;
 const analysisPanels: Record<AnalysisSource, HTMLElement> = {
@@ -408,8 +424,12 @@ const rasterizeSelectionEl = document.getElementById("rasterize-selection")!;
 const rasterizeSelectionMetaEl = document.getElementById("rasterize-selection-meta")!;
 const rasterizeFormatInput = document.getElementById("rasterize-format") as HTMLSelectElement;
 const rasterizeScaleInput = document.getElementById("rasterize-scale") as HTMLInputElement;
+const rasterizePixelWidthInput = document.getElementById("rasterize-pixel-width") as HTMLInputElement;
+const rasterizePixelHeightInput = document.getElementById("rasterize-pixel-height") as HTMLInputElement;
 const rasterizeQualityField = document.getElementById("rasterize-quality-field")!;
 const rasterizeQualityInput = document.getElementById("rasterize-quality") as HTMLInputElement;
+const rasterizeSourceSizeEl = document.getElementById("rasterize-source-size")!;
+const rasterizeOutputSizeEl = document.getElementById("rasterize-output-size")!;
 const rasterizeHelp = document.getElementById("rasterize-help")!;
 const btnRasterizeCancel = document.getElementById("btn-rasterize-cancel") as HTMLButtonElement;
 const btnRasterizeConfirm = document.getElementById("btn-rasterize-confirm") as HTMLButtonElement;
@@ -489,6 +509,59 @@ function renderSvgPreview(
   if (spinner) container.appendChild(spinner);
 }
 
+function getPreviewSvgMarkup(source: AnalysisSource): string | null {
+  return source === "original" ? originalSvg : optimizedSvg;
+}
+
+function getPreviewSourceLabel(source: AnalysisSource): string {
+  return source === "original" ? "Original" : "Optimisé";
+}
+
+function syncFullscreenPreview(): void {
+  if (!activeFullscreenPreviewSource) return;
+
+  const svgMarkup = getPreviewSvgMarkup(activeFullscreenPreviewSource);
+  if (!svgMarkup) {
+    const fallbackSource: AnalysisSource =
+      activeFullscreenPreviewSource === "original" ? "optimized" : "original";
+    if (!getPreviewSvgMarkup(fallbackSource)) {
+      closeFullscreenPreview();
+      return;
+    }
+    activeFullscreenPreviewSource = fallbackSource;
+  }
+
+  const resolvedSource = activeFullscreenPreviewSource;
+  const resolvedMarkup = getPreviewSvgMarkup(resolvedSource);
+  if (!resolvedMarkup) {
+    closeFullscreenPreview();
+    return;
+  }
+
+  renderSvgPreview(fullscreenPreviewDisplay, resolvedMarkup, {
+    includeSpinner: resolvedSource === "optimized",
+  });
+  fullscreenPreviewSourceEl.textContent = getPreviewSourceLabel(resolvedSource);
+
+  const alternateSource: AnalysisSource = resolvedSource === "original" ? "optimized" : "original";
+  btnFullscreenPreviewToggle.disabled = !getPreviewSvgMarkup(alternateSource);
+  btnFullscreenPreviewToggle.textContent =
+    alternateSource === "original" ? "Voir l’original" : "Voir l’optimisé";
+}
+
+function openFullscreenPreview(source: AnalysisSource): void {
+  if (!getPreviewSvgMarkup(source)) return;
+  activeFullscreenPreviewSource = source;
+  syncFullscreenPreview();
+  modalFullscreenPreview.classList.remove("hidden");
+}
+
+function closeFullscreenPreview(): void {
+  modalFullscreenPreview.classList.add("hidden");
+  activeFullscreenPreviewSource = null;
+  fullscreenPreviewDisplay.replaceChildren();
+}
+
 function syncPreviewDisplays(): void {
   if (originalSvg) {
     renderSvgPreview(svgDisplayOriginal, originalSvg);
@@ -503,6 +576,8 @@ function syncPreviewDisplays(): void {
   } else {
     svgDisplayOptimized.replaceChildren();
   }
+
+  syncFullscreenPreview();
 }
 
 function collectPreviewSelectorsFromSvg(
@@ -559,6 +634,7 @@ function setPreviewCss(nextCss: string): void {
   syncPreviewCssButtonState();
   applyPreviewCssToMountedPreview(svgDisplayOriginal);
   applyPreviewCssToMountedPreview(svgDisplayOptimized);
+  applyPreviewCssToMountedPreview(fullscreenPreviewDisplay);
 }
 
 function renderPreviewSelectorGroup(
@@ -1155,8 +1231,97 @@ function syncRasterizeQualityVisibility(): void {
   const isWebp = rasterizeFormatInput.value === "webp";
   rasterizeQualityField.hidden = !isWebp;
   rasterizeHelp.textContent = isWebp
-    ? "WebP peut réduire davantage le poids, mais le résultat dépend du navigateur et du contenu du tracé."
-    : "PNG garde une transparence propre et évite les artefacts, mais n’est pas toujours le plus léger.";
+    ? `L’échelle ajuste la résolution du raster (${trimNumber(MIN_RASTERIZE_SCALE)}x à ${trimNumber(MAX_RASTERIZE_SCALE)}x). Largeur et hauteur en px recalculent l’échelle en gardant le ratio. La qualité WebP (${trimNumber(MIN_WEBP_QUALITY)} à ${trimNumber(MAX_WEBP_QUALITY)}) pilote la compression : ${trimNumber(DEFAULT_WEBP_QUALITY)} garde en général un bon rendu, plus bas allège davantage, plus haut limite les artefacts.`
+    : `L’échelle ajuste la résolution du raster (${trimNumber(MIN_RASTERIZE_SCALE)}x à ${trimNumber(MAX_RASTERIZE_SCALE)}x). Largeur et hauteur en px recalculent l’échelle en gardant le ratio. PNG garde une transparence propre et évite les artefacts, mais n’est pas toujours le plus léger.`;
+}
+
+function getRasterPixelDimensions(bounds: SvgCoordinateBox, scale: number): { width: number; height: number } {
+  return {
+    width: Math.max(1, Math.ceil(bounds.width * scale)),
+    height: Math.max(1, Math.ceil(bounds.height * scale)),
+  };
+}
+
+function formatEditableNumber(value: number, precision = 3): string {
+  const rounded = Number.parseFloat(value.toFixed(precision));
+  return Number.isInteger(rounded) ? String(rounded) : String(rounded);
+}
+
+function syncRasterizeDimensionSummary(bounds: SvgCoordinateBox, scale: number): void {
+  const pixelDimensions = getRasterPixelDimensions(bounds, scale);
+  rasterizeSourceSizeEl.textContent = `${trimNumber(bounds.width)} × ${trimNumber(bounds.height)}`;
+  rasterizeOutputSizeEl.textContent = `${pixelDimensions.width} × ${pixelDimensions.height} px`;
+}
+
+function syncRasterizePixelRange(bounds: SvgCoordinateBox): void {
+  const minDimensions = getRasterPixelDimensions(bounds, MIN_RASTERIZE_SCALE);
+  const maxDimensions = getRasterPixelDimensions(bounds, MAX_RASTERIZE_SCALE);
+  rasterizePixelWidthInput.min = String(minDimensions.width);
+  rasterizePixelWidthInput.max = String(maxDimensions.width);
+  rasterizePixelHeightInput.min = String(minDimensions.height);
+  rasterizePixelHeightInput.max = String(maxDimensions.height);
+}
+
+function refreshRasterizeDimensionPreview(): void {
+  const bounds = pendingRasterizeSelection?.targetBounds;
+  if (!bounds || isSyncingRasterizeFields) return;
+
+  syncRasterizePixelRange(bounds);
+  const scale = Number.parseFloat(rasterizeScaleInput.value);
+  if (!Number.isFinite(scale) || scale <= 0) return;
+
+  const pixelDimensions = getRasterPixelDimensions(bounds, scale);
+  isSyncingRasterizeFields = true;
+  rasterizePixelWidthInput.value = String(pixelDimensions.width);
+  rasterizePixelHeightInput.value = String(pixelDimensions.height);
+  isSyncingRasterizeFields = false;
+  syncRasterizeDimensionSummary(bounds, scale);
+}
+
+function syncRasterizeScaleFromPixelInput(source: "width" | "height"): void {
+  const bounds = pendingRasterizeSelection?.targetBounds;
+  if (!bounds || isSyncingRasterizeFields) return;
+
+  const input = source === "width" ? rasterizePixelWidthInput : rasterizePixelHeightInput;
+  const nextPixels = Number.parseFloat(input.value);
+  const baseSize = source === "width" ? bounds.width : bounds.height;
+  if (!Number.isFinite(nextPixels) || nextPixels < 1 || baseSize <= 0) return;
+
+  const nextScale = nextPixels / baseSize;
+  if (!Number.isFinite(nextScale) || nextScale <= 0) return;
+
+  isSyncingRasterizeFields = true;
+  rasterizeScaleInput.value = formatEditableNumber(nextScale);
+  isSyncingRasterizeFields = false;
+  refreshRasterizeDimensionPreview();
+}
+
+function measureRasterizeSelectionBounds(sourceSvg: string, selector: string): SvgCoordinateBox {
+  const sourceRoot = parseSvgRoot(sourceSvg);
+  if (!sourceRoot) {
+    throw new Error("Le SVG à rasteriser n'a pas pu être relu.");
+  }
+
+  const coordinateBox = readSvgCoordinateBox(sourceRoot);
+  if (!coordinateBox) {
+    throw new Error("Impossible de mesurer ce SVG pour la rasterisation.");
+  }
+
+  const mountedSource = mountSvgForMeasurement(sourceRoot, coordinateBox);
+  try {
+    const sourceTarget = resolveElementByAnalysisSelector(mountedSource.root, selector);
+    if (!(sourceTarget instanceof SVGGraphicsElement) || sourceTarget.localName !== "path") {
+      throw new Error(`Le nœud ${selector} n'est plus un path rasterisable.`);
+    }
+
+    if (hasUnsupportedRasterizationContext(sourceTarget)) {
+      throw new Error(`Le path ${selector} dépend d'un contexte non pris en charge.`);
+    }
+
+    return measureRasterizedPathBounds(mountedSource.root, sourceTarget, coordinateBox);
+  } finally {
+    mountedSource.cleanup();
+  }
 }
 
 function findManualRasterEdit(selector: string): RasterizationEdit | undefined {
@@ -1170,6 +1335,13 @@ function openRasterizeModal(node: HeavyNode): void {
   }
 
   const existingEdit = findManualRasterEdit(node.selector);
+  let targetBounds: SvgCoordinateBox;
+  try {
+    targetBounds = measureRasterizeSelectionBounds(optimizedSvg, node.selector);
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : "Impossible de mesurer ce path.");
+    return;
+  }
 
   pendingRasterizeSelection = {
     selector: node.selector,
@@ -1177,6 +1349,7 @@ function openRasterizeModal(node: HeavyNode): void {
     note: node.note,
     pathDataBytes: node.pathDataBytes,
     existingOptions: existingEdit?.options,
+    targetBounds,
   };
 
   rasterizeSelectionEl.textContent = `${node.label} · ${node.selector}`;
@@ -1186,9 +1359,10 @@ function openRasterizeModal(node: HeavyNode): void {
   rasterizeSelectionMetaEl.textContent =
     [...metaParts].join(" · ") || "Path sélectionné pour remplacement manuel.";
 
-  rasterizeFormatInput.value = existingEdit?.options.format ?? "png";
-  rasterizeScaleInput.value = String(existingEdit?.options.scale ?? 2);
-  rasterizeQualityInput.value = String(existingEdit?.options.quality ?? 0.92);
+  rasterizeFormatInput.value = existingEdit?.options.format ?? DEFAULT_RASTERIZE_FORMAT;
+  rasterizeScaleInput.value = String(existingEdit?.options.scale ?? DEFAULT_RASTERIZE_SCALE);
+  rasterizeQualityInput.value = String(existingEdit?.options.quality ?? DEFAULT_WEBP_QUALITY);
+  refreshRasterizeDimensionPreview();
   syncRasterizeQualityVisibility();
 
   modalRasterize.classList.remove("hidden");
@@ -1206,12 +1380,27 @@ function openRasterizeModalForManagedRaster(raster: SvgAnalysis["embeddedRasters
     return;
   }
 
+  const sourceSvg = baseOptimizedSvg ?? optimizedSvg;
+  if (!sourceSvg) {
+    showToast("Le SVG optimisé de base n'est plus disponible.");
+    return;
+  }
+
+  let targetBounds: SvgCoordinateBox;
+  try {
+    targetBounds = measureRasterizeSelectionBounds(sourceSvg, existingEdit.selector);
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : "Impossible de mesurer ce path.");
+    return;
+  }
+
   pendingRasterizeSelection = {
     selector: existingEdit.selector,
     label: existingEdit.label,
     note: existingEdit.note,
     pathDataBytes: existingEdit.pathDataBytes,
     existingOptions: existingEdit.options,
+    targetBounds,
   };
 
   rasterizeSelectionEl.textContent = `${existingEdit.label} · ${existingEdit.selector}`;
@@ -1224,6 +1413,7 @@ function openRasterizeModalForManagedRaster(raster: SvgAnalysis["embeddedRasters
   rasterizeFormatInput.value = existingEdit.options.format;
   rasterizeScaleInput.value = String(existingEdit.options.scale);
   rasterizeQualityInput.value = String(existingEdit.options.quality);
+  refreshRasterizeDimensionPreview();
   syncRasterizeQualityVisibility();
 
   modalRasterize.classList.remove("hidden");
@@ -1237,7 +1427,11 @@ function closeRasterizeModal(): void {
   rasterizeClose.disabled = false;
   rasterizeFormatInput.disabled = false;
   rasterizeScaleInput.disabled = false;
+  rasterizePixelWidthInput.disabled = false;
+  rasterizePixelHeightInput.disabled = false;
   rasterizeQualityInput.disabled = false;
+  rasterizeSourceSizeEl.textContent = "—";
+  rasterizeOutputSizeEl.textContent = "—";
   btnRasterizeConfirm.textContent = "Rasteriser";
 }
 
@@ -1247,6 +1441,8 @@ function setRasterizeModalBusy(busy: boolean): void {
   rasterizeClose.disabled = busy;
   rasterizeFormatInput.disabled = busy;
   rasterizeScaleInput.disabled = busy;
+  rasterizePixelWidthInput.disabled = busy;
+  rasterizePixelHeightInput.disabled = busy;
   rasterizeQualityInput.disabled = busy;
   btnRasterizeConfirm.textContent = busy ? "Rasterisation…" : "Rasteriser";
 }
@@ -1258,13 +1454,20 @@ async function confirmRasterization(): Promise<void> {
   const scale = Number.parseFloat(rasterizeScaleInput.value);
   const quality = Number.parseFloat(rasterizeQualityInput.value);
 
-  if (!Number.isFinite(scale) || scale < 1 || scale > 8) {
-    showToast("L'échelle doit rester entre 1 et 8.");
+  if (!Number.isFinite(scale) || scale < MIN_RASTERIZE_SCALE || scale > MAX_RASTERIZE_SCALE) {
+    showToast(
+      `L'échelle doit rester entre ${trimNumber(MIN_RASTERIZE_SCALE)} et ${trimNumber(MAX_RASTERIZE_SCALE)}.`
+    );
     return;
   }
 
-  if (rasterizeFormatInput.value === "webp" && (!Number.isFinite(quality) || quality < 0.1 || quality > 1)) {
-    showToast("La qualité WebP doit rester entre 0.1 et 1.");
+  if (
+    rasterizeFormatInput.value === "webp" &&
+    (!Number.isFinite(quality) || quality < MIN_WEBP_QUALITY || quality > MAX_WEBP_QUALITY)
+  ) {
+    showToast(
+      `La qualité WebP doit rester entre ${trimNumber(MIN_WEBP_QUALITY)} et ${trimNumber(MAX_WEBP_QUALITY)}.`
+    );
     return;
   }
 
@@ -1272,7 +1475,7 @@ async function confirmRasterization(): Promise<void> {
   const options: RasterizeOptions = {
     format: rasterizeFormatInput.value === "webp" ? "webp" : "png",
     scale,
-    quality: Number.isFinite(quality) ? quality : 0.92,
+    quality: Number.isFinite(quality) ? quality : DEFAULT_WEBP_QUALITY,
   };
   const wasUpdate = manualRasterEdits.some((edit) => edit.selector === selection.selector);
   const nextEdit: RasterizationEdit = {
@@ -1357,6 +1560,20 @@ async function removeManualRasterization(
 }
 
 rasterizeFormatInput.addEventListener("change", syncRasterizeQualityVisibility);
+rasterizeScaleInput.addEventListener("input", refreshRasterizeDimensionPreview);
+rasterizeScaleInput.addEventListener("change", refreshRasterizeDimensionPreview);
+rasterizePixelWidthInput.addEventListener("input", () => {
+  syncRasterizeScaleFromPixelInput("width");
+});
+rasterizePixelWidthInput.addEventListener("change", () => {
+  syncRasterizeScaleFromPixelInput("width");
+});
+rasterizePixelHeightInput.addEventListener("input", () => {
+  syncRasterizeScaleFromPixelInput("height");
+});
+rasterizePixelHeightInput.addEventListener("change", () => {
+  syncRasterizeScaleFromPixelInput("height");
+});
 rasterizeClose.addEventListener("click", closeRasterizeModal);
 btnRasterizeCancel.addEventListener("click", closeRasterizeModal);
 btnRasterizeConfirm.addEventListener("click", () => {
@@ -1486,6 +1703,39 @@ btnToggleTabPreview.addEventListener("click", () => {
 });
 
 syncOutputTabs();
+
+function bindFullscreenPreviewTrigger(container: HTMLElement, source: AnalysisSource): void {
+  container.addEventListener("click", () => {
+    openFullscreenPreview(source);
+  });
+
+  container.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    openFullscreenPreview(source);
+  });
+}
+
+bindFullscreenPreviewTrigger(svgDisplayOriginal, "original");
+bindFullscreenPreviewTrigger(svgDisplayOptimized, "optimized");
+
+btnFullscreenPreviewToggle.addEventListener("click", () => {
+  if (!activeFullscreenPreviewSource) return;
+  openFullscreenPreview(activeFullscreenPreviewSource === "original" ? "optimized" : "original");
+});
+
+fullscreenPreviewClose.addEventListener("click", closeFullscreenPreview);
+modalFullscreenPreview.addEventListener("click", (event) => {
+  if (event.target === modalFullscreenPreview) {
+    closeFullscreenPreview();
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !modalFullscreenPreview.classList.contains("hidden")) {
+    closeFullscreenPreview();
+  }
+});
 
 interface PotentialGain {
   level: "opportunity" | "warning" | "info";
@@ -2103,14 +2353,9 @@ async function rasterizeSourcePathElement(
       throw new Error("Impossible de préparer le path pour la rasterisation.");
     }
 
-    const rootRect = mountedStandalone.root.getBoundingClientRect();
-    const targetRect = standaloneTarget.getBoundingClientRect();
-    const targetBounds = clampCoordinateBox(
-      expandCoordinateBox(
-        mapClientRectToCoordinateBox(rootRect, targetRect, coordinateBox),
-        coordinateBox.width / Math.max(1, rootRect.width),
-        coordinateBox.height / Math.max(1, rootRect.height)
-      ),
+    const targetBounds = computeRasterTargetBounds(
+      mountedStandalone.root,
+      standaloneTarget,
       coordinateBox
     );
 
@@ -2118,8 +2363,10 @@ async function rasterizeSourcePathElement(
       throw new Error("Le path sélectionné est trop petit ou non visible pour être rasterisé.");
     }
 
-    const pixelWidth = Math.max(1, Math.ceil(targetBounds.width * options.scale));
-    const pixelHeight = Math.max(1, Math.ceil(targetBounds.height * options.scale));
+    const { width: pixelWidth, height: pixelHeight } = getRasterPixelDimensions(
+      targetBounds,
+      options.scale
+    );
     prepareStandaloneSvgForRaster(standaloneRoot, targetBounds, pixelWidth, pixelHeight);
 
     const rasterMarkup = new XMLSerializer().serializeToString(standaloneRoot);
@@ -2318,6 +2565,46 @@ function applyComputedSvgStyles(source: SVGGraphicsElement, target: SVGGraphicsE
   if (rules.length > 0) {
     target.setAttribute("style", rules.join(";"));
   }
+}
+
+function measureRasterizedPathBounds(
+  sourceRoot: SVGSVGElement,
+  liveTarget: SVGGraphicsElement,
+  coordinateBox: SvgCoordinateBox
+): SvgCoordinateBox {
+  const standaloneRoot = buildStandalonePathSvg(sourceRoot, liveTarget, coordinateBox);
+  const mountedStandalone = mountSvgForMeasurement(standaloneRoot, coordinateBox);
+
+  try {
+    const standaloneTarget = mountedStandalone.root.querySelector<SVGGraphicsElement>(
+      "[data-raster-target='1']"
+    );
+    if (!(standaloneTarget instanceof SVGGraphicsElement)) {
+      throw new Error("Impossible de préparer le path pour la rasterisation.");
+    }
+
+    return computeRasterTargetBounds(mountedStandalone.root, standaloneTarget, coordinateBox);
+  } finally {
+    mountedStandalone.cleanup();
+  }
+}
+
+function computeRasterTargetBounds(
+  mountedRoot: SVGSVGElement,
+  mountedTarget: SVGGraphicsElement,
+  coordinateBox: SvgCoordinateBox
+): SvgCoordinateBox {
+  const rootRect = mountedRoot.getBoundingClientRect();
+  const targetRect = mountedTarget.getBoundingClientRect();
+
+  return clampCoordinateBox(
+    expandCoordinateBox(
+      mapClientRectToCoordinateBox(rootRect, targetRect, coordinateBox),
+      coordinateBox.width / Math.max(1, rootRect.width),
+      coordinateBox.height / Math.max(1, rootRect.height)
+    ),
+    coordinateBox
+  );
 }
 
 function mapClientRectToCoordinateBox(
